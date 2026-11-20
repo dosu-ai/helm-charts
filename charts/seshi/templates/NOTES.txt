@@ -8,23 +8,29 @@ Outside it: http{{ if $.Values.ingress.tls }}s{{ end }}://{{ .host }}
 {{- else }}
 From here: kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "seshi.fullname" . }} 7200:{{ .Values.service.port }}
 {{- end }}
+{{- $orgKey := dig "auth" "org_key" "enabled" true (.Values.config | default dict) }}
+{{- if and .Values.bootstrap.enabled (not (include "seshi.folderStore" .)) }}
 
-{{- if .Values.bootstrap.enabled }}
-The first admin token and the org key are in the Secret {{ include "seshi.bootstrapSecretName" . }}
-(made once, on first install, by the {{ include "seshi.fullname" . }}-bootstrap Job):
+On first install, the {{ include "seshi.bootstrapStatusName" . }} Job saves the store's first admin token
+{{- if $orgKey }} and the org key{{ end }} in the Secret {{ include "seshi.bootstrapSecretName" . }}:
 
   kubectl -n {{ .Release.Namespace }} get secret {{ include "seshi.bootstrapSecretName" . }} -o jsonpath='{.data.admin-token}' | base64 -d
+{{- if $orgKey }}
   kubectl -n {{ .Release.Namespace }} get secret {{ include "seshi.bootstrapSecretName" . }} -o jsonpath='{.data.org-key}' | base64 -d
 
-Members sign in with `seshi login --server <url> --key <org key>`. Move the tokens somewhere
-safe and delete the Secret when you like; seshi does not read it. With an IdP, add
-config.auth.oidc and sign in through it instead.
+Members sign in with `seshi login --server <url> --key <org key>`.
+{{- end }}
+
+If the store already had an admin, the Secret is not written: the ConfigMap
+{{ include "seshi.bootstrapStatusName" . }} says already-initialized. Move the tokens somewhere safe and
+delete the Secret when you like; seshi does not read it.
 {{- else }}
-Make the first admin token and the org key once:
+
+Make the store's first admin token{{ if $orgKey }} and org key{{ end }} once, in the server pod:
 
   kubectl -n {{ .Release.Namespace }} exec deploy/{{ include "seshi.fullname" . }} -- seshi admin init --json
 
-A second `admin init` exits 6: the bucket already has an admin.
+A second `admin init` exits 6: the store already has an admin.
 {{- end }}
 {{- if not .Values.persistence.enabled }}
 

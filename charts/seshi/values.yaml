@@ -54,19 +54,20 @@ dropIns: {}
 # /etc/seshi/packs/ and added to redaction.packs.
 redactionPacks: {}
 
-# The first admin token and the org key, made for you after the first install and kept in a
-# Secret (<release>-initial-admin), the way Argo CD keeps its initial admin password. A
-# post-install Job runs `seshi admin init` against the bucket and writes the Secret with
-# kubectl, so it gets a Role that may create Secrets in the namespace. Skipped when the bucket
-# already has an admin. false: run `seshi admin init` yourself.
+# The first admin token and the org key, made for you after the first install and kept in the
+# Secret <release>-initial-admin, the way Argo CD keeps its initial admin password (README.md,
+# "First tokens"). A post-install Job runs `seshi admin init` against the bucket and saves the
+# Secret through the Kubernetes API, so it gets a Role that may create Secrets and ConfigMaps in
+# the namespace. It runs on install only, and not for a folder store (run `seshi admin init` in
+# the server pod then). false: run it yourself.
 bootstrap:
   enabled: true
   # Defaults to <fullname>-initial-admin.
   secretName: ""
-  # The admin token's owner (`seshi admin init --owner`).
+  # The admin token's owner (`seshi admin init --owner`): a person's owner id.
   owner: admin
-  # Applies the Secret: any image whose entry point is kubectl.
-  kubectlImage: registry.k8s.io/kubectl:v1.34.0@sha256:497d298f891edb7608dfce9dae4bb08dffc4ddcd7f5d24a0512d4bbf33e04f26
+  # Talks to the Kubernetes API: any image with sh, curl, sed, grep and base64.
+  curlImage: curlimages/curl:8.17.0@sha256:935d9100e9ba842cdb060de42472c7ca90cfe9a7c96e4dacb55e79e560b3ff40
   resources: {}
 
 # /data: the search index, and a file:// store.

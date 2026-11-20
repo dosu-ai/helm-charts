@@ -94,8 +94,12 @@
       "properties": {
         "enabled": { "type": "boolean" },
         "secretName": { "type": "string" },
-        "owner": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$" },
-        "kubectlImage": { "type": "string", "minLength": 1 },
+        "owner": {
+          "description": "A person's owner id, as seshi admin init --owner takes it.",
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._@+-]{0,127}$"
+        },
+        "curlImage": { "type": "string", "minLength": 1 },
         "resources": { "type": "object" }
       }
     },

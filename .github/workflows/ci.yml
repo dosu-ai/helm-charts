@@ -20,6 +20,9 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.3
       - name: Changed charts have a new version
         env:
           BASE: ${{ github.event.pull_request.base.sha }}
@@ -32,7 +35,7 @@ jobs:
             old="$(git show "$BASE:$chart/Chart.yaml" 2>/dev/null | sed -n 's/^version: //p')"
             if [ -z "$old" ]; then
               echo "$chart: new chart at $new"
-            elif [ "$new" = "$old" ] || [ "$(printf '%s\n%s\n' "$old" "$new" | sort -V | tail -1)" != "$new" ]; then
+            elif ! bun -e 'process.exit(Bun.semver.order(process.argv[1], process.argv[2]) < 0 ? 0 : 1)' "$old" "$new"; then
               echo "::error file=$chart/Chart.yaml::$chart changed but its version is still $old (now $new): bump it"
               status=1
             else

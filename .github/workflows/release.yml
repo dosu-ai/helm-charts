@@ -1,8 +1,8 @@
 name: release
 
-# A chart whose version is not yet in the registry is packaged and pushed to
-# oci://ghcr.io/dosu-ai/charts/<chart>, tagged <chart>-<version>, and given a GitHub release.
-# A merge that does not change a chart's version publishes nothing for it.
+# Publishes each chart version: the package at oci://ghcr.io/dosu-ai/charts/<chart>, a tag
+# <chart>-<version>, and a GitHub release with the package attached. Each part is checked on
+# its own, so a run that failed halfway is finished by the next one. Only main publishes.
 on:
   push:
     branches: [main]
@@ -18,6 +18,7 @@ concurrency:
 
 jobs:
   publish:
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       contents: write # the tag and the GitHub release
@@ -29,24 +30,44 @@ jobs:
       - uses: azure/setup-helm@2f5e7bc67f1f9972ab16657bb795f36d8f04de0e # v5.1.0
         with:
           version: v4.3.2
-      - name: Package and push new chart versions
+      - name: Publish new chart versions
         env:
           GH_TOKEN: ${{ github.token }}
-          REGISTRY: oci://ghcr.io/${{ github.repository_owner }}/charts
+          OWNER: ${{ github.repository_owner }}
+          ACTOR: ${{ github.actor }}
         run: |
-          echo "$GH_TOKEN" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
+          registry="oci://ghcr.io/$OWNER/charts"
+          echo "$GH_TOKEN" | helm registry login ghcr.io -u "$ACTOR" --password-stdin
           mkdir -p dist
           for chart in charts/*/; do
             chart="${chart%/}"
             name="$(sed -n 's/^name: //p' "$chart/Chart.yaml")"
             version="$(sed -n 's/^version: //p' "$chart/Chart.yaml")"
-            if helm show chart "$REGISTRY/$name" --version "$version" >/dev/null 2>&1; then
-              echo "$name $version is already published"
-              continue
+            tag="$name-$version"
+            helm package "$chart" --destination dist >/dev/null
+            package="dist/$name-$version.tgz"
+
+            # The registry: push unless this version is there. Anything but "not found" stops.
+            if out="$(helm show chart "$registry/$name" --version "$version" 2>&1)"; then
+              echo "$registry/$name:$version is published"
+            elif printf '%s' "$out" | grep -qiE 'not found|manifest unknown|name unknown'; then
+              helm push "$package" "$registry"
+            else
+              echo "::error::checking $registry/$name:$version: $out"
+              exit 1
             fi
-            helm package "$chart" --destination dist
-            helm push "dist/$name-$version.tgz" "$REGISTRY"
-            gh release create "$name-$version" "dist/$name-$version.tgz" \
-              --target "$GITHUB_SHA" --title "$name $version" \
-              --notes "helm install $name $REGISTRY/$name --version $version"
+
+            # The tag and the GitHub release, with the package attached.
+            if ! gh release view "$tag" >/dev/null 2>&1; then
+              gh release create "$tag" "$package" --target "$GITHUB_SHA" --title "$name $version" \
+                --notes "helm install $name $registry/$name --version $version (see charts/$name/README.md)"
+            elif ! gh release view "$tag" --json assets --jq '.assets[].name' | grep -qx "$name-$version.tgz"; then
+              gh release upload "$tag" "$package"
+            fi
+
+            # A new GHCR package starts private, and GitHub's API cannot change that: an org
+            # admin makes it public once, in the package's settings.
+            if ! HELM_REGISTRY_CONFIG=/tmp/anonymous.json helm show chart "$registry/$name" --version "$version" >/dev/null 2>&1; then
+              echo "::warning::$registry/$name is not public yet. Make it public: https://github.com/orgs/$OWNER/packages/container/charts%2F$name/settings"
+            fi
           done

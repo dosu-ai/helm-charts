@@ -4,7 +4,7 @@ Helm charts for Dosu's open-source servers.
 
 | Chart | Runs | Install |
 |---|---|---|
-| [seshi](charts/seshi) | The [seshi](https://github.com/dosu-ai/seshi) session store server | `helm install seshi oci://ghcr.io/dosu-ai/charts/seshi` |
+| [seshi](charts/seshi) | The [seshi](https://github.com/dosu-ai/seshi) session store server | `oci://ghcr.io/dosu-ai/charts/seshi` ([install](charts/seshi/README.md#install)) |
 
 Each chart is published to `oci://ghcr.io/dosu-ai/charts/<chart>` when a change to it merges.
 A chart's `version` is its own; its `appVersion` is the release of the software it runs.

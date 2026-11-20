@@ -85,7 +85,7 @@ app.kubernetes.io/component: server
 {{- if not .Values.persistence.enabled }}
 {{- fail "store.url is a folder store but persistence.enabled is false: the sessions would be lost with the pod" }}
 {{- end }}
-{{- if or (not (regexMatch "^(file://)?/data(/.*)?$" $url)) (contains ".." $url) }}
+{{- if or (not (regexMatch "^(file://)?/data(/.*)?$" $url)) (contains ".." $url) (contains "%" $url) }}
 {{- fail "store.url: a folder store must be under /data (file:///data/store), the only folder on the claim" }}
 {{- end }}
 {{- end }}

@@ -51,8 +51,8 @@ The chart writes `seshi.toml` into a ConfigMap mounted at `/etc/seshi`, and sets
 without a flag. A change to the config restarts the pod. The chart sets `[store]`,
 `server.listen` (`:7200`) and, unless `config.search.path` says otherwise, `search.path`
 (`/data/search/index.sqlite`). It refuses `config.store`, `config.server.listen` and
-`config.server.roles`, and starts seshi with `--listen :7200 --roles api,worker`, which win
-over any `SESHI_SERVER__*` variable.
+`config.server.roles`, and starts seshi with `--listen :7200 --roles api,worker` and
+`--set store.url=…`, which win over any `SESHI_*` variable.
 
 ### Secrets
 
@@ -77,27 +77,47 @@ in the namespace would give the pod `SESHI_SERVICE_HOST`, and seshi would not st
 
 ## First tokens
 
-With `bootstrap.enabled` (the default), a post-install Job runs `seshi admin init` against the
-bucket once. It writes the first admin token (`admin-token`, owned by `bootstrap.owner`) and,
-when `auth.org_key` is on (the default), the org key (`org-key`) into the Secret
-`<release>-initial-admin`. Argo CD keeps its initial admin password the same way.
+With `bootstrap.enabled` (the default), a post-install Job makes the store's first admin token
+and, when `auth.org_key` is on (the default), the org key, and saves them in the Secret
+`<release>-initial-admin` (`admin-token`, `admin-owner`, `org-key`). Argo CD keeps its initial
+admin password the same way. The Job has three steps:
 
-- The Job runs as a Helm hook with its own ServiceAccount and a Role that may create Secrets
-  and ConfigMaps in the namespace, and may read and patch only the two it writes. Helm deletes
-  the Job and its Role when it succeeds.
-- The Secret is not part of the release. It outlives `helm uninstall`, like the bucket's admin it
-  belongs to. seshi never reads it: copy the tokens to a password manager and delete it when you
-  like.
-- A bucket that already has an admin is left alone. On a reinstall, the Job's `admin init`
-  exits 6 and the Job records `already-initialized` in the ConfigMap `<release>-bootstrap`.
-- Admins make more tokens with `seshi tokens` or `POST /v1/tokens`. With an IdP, add
-  `config.auth.oidc` and members sign in through it; the admin token still works.
+1. **check** reads the Secret. If it already holds this store's tokens, the Job is done. If it
+   holds another store's (the store is recorded on the Secret as `seshi.dosu.ai/store`), the Job
+   stops before making any: move the Secret aside, or set `bootstrap.secretName`. Otherwise it
+   records `minting` in the ConfigMap `<release>-bootstrap`.
+2. **admin-init** runs `seshi admin init` against the bucket.
+3. **save** creates the Secret and records `initialized`.
+
+The tokens pass between the steps in a memory-backed volume, and a failed step is retried in
+the same pod, so a brief API outage does not lose them. Some outcomes are worth knowing:
+
+- **The store already had an admin**, made outside this release. The Secret is not written
+  and the ConfigMap says `already-initialized`. When the org key was off then and is on now,
+  the Job makes the org key and saves only that.
+- **An earlier run made tokens and lost them.** Its pod was replaced between steps 2 and 3:
+  `seshi admin init` now says "already set up" while the ConfigMap still says `minting`. The
+  Job fails and its log says how to make new tokens in the server pod
+  (`seshi admin init --force`, `--rotate-org-key`).
+- **Not on upgrade.** The Job runs on `helm install` only. Turning `bootstrap.enabled` on later
+  does nothing; run `seshi admin init` in the server pod instead.
+- **Not for a folder store.** The server pod holds the claim, so make the tokens there.
+
+The Job runs with its own ServiceAccount and a Role that may create Secrets and ConfigMaps in
+the namespace, and may read and replace only the two it writes. Helm deletes the Job and its
+Role when it succeeds. Under an egress NetworkPolicy, the Job must reach the Kubernetes API as
+well as the bucket. The Secret and the ConfigMap are not part of the release: they outlive
+`helm uninstall`, like the store's admin they belong to. seshi never reads the Secret: copy the
+tokens to a password manager and delete it when you like.
 
 `bootstrap.enabled: false` skips all of it. Then run `seshi admin init` yourself:
 
 ```sh
 kubectl -n seshi exec deploy/seshi -- seshi admin init --json
 ```
+
+Admins make more tokens with `seshi tokens` or `POST /v1/tokens`. With an IdP, add
+`config.auth.oidc` and members sign in through it; the admin token still works.
 
 ## Storage
 
@@ -111,9 +131,12 @@ for a folder store (`file:///data/…`).
   `existingClaim`). The index survives restarts. Recommended for production, and for readers of
   `/v1/changes/all`.
 
-A folder store must be under `/data` and needs `persistence.enabled`; the chart refuses
-anything else. The chart keeps the claim when the release is uninstalled or persistence is
-turned off (`helm.sh/resource-policy: keep`). Delete it by hand when you mean to.
+A folder store must be under `/data` (no `..` or `%` escapes) and needs `persistence.enabled`;
+the chart refuses anything else. The chart passes `store.url` to seshi as a flag, so a
+`SESHI_STORE__URL` in `extraEnv` or `envFrom` cannot point it elsewhere.
+
+The chart keeps the claim when the release is uninstalled or persistence is turned off
+(`helm.sh/resource-policy: keep`). Delete it by hand when you mean to.
 
 ## Drop-ins and rule packs
 

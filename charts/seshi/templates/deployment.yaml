@@ -51,9 +51,16 @@ spec:
         - name: seshi
           image: {{ include "seshi.image" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
-          # Flags win over any SESHI_SERVER__* in extraEnv or envFrom: the Service, the probes and
-          # the one-worker rule depend on these two.
-          args: ["serve", "--listen", ":7200", "--roles", "api,worker"]
+          # Flags win over any SESHI_* in extraEnv or envFrom: the Service, the probes and the
+          # one-worker rule depend on the first two, and the chart's checks on the store.
+          args:
+            - serve
+            - --listen
+            - ":7200"
+            - --roles
+            - api,worker
+            - --set
+            - {{ printf "store.url=%s" .Values.store.url | quote }}
           ports:
             - name: http
               containerPort: 7200
