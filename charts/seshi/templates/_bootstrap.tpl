@@ -11,7 +11,7 @@ the owner reach the scripts as STORE_URL and BOOTSTRAP_OWNER, never inside the s
 the shell does not expand anything in them. */}}
 
 {{- define "seshi.bootstrapStatusName" -}}
-{{- printf "%s-bootstrap" (include "seshi.fullname" .) }}
+{{- include "seshi.suffixed" (dict "root" . "suffix" "bootstrap") }}
 {{- end }}
 
 {{/* Step 0. The store's identity: the bucket URL, endpoint, account and deployment id seshi

@@ -18,11 +18,23 @@
 
 {{/* Labels on everything the release makes, without a component. */}}
 {{- define "seshi.releaseLabels" -}}
-helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-" }}
-app.kubernetes.io/name: {{ include "seshi.name" . }}
-app.kubernetes.io/instance: {{ .Release.Name }}
+helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-" | quote }}
+app.kubernetes.io/name: {{ include "seshi.name" . | quote }}
+app.kubernetes.io/instance: {{ .Release.Name | quote }}
 app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
-app.kubernetes.io/managed-by: {{ .Release.Service }}
+app.kubernetes.io/managed-by: {{ .Release.Service | quote }}
+{{- end }}
+
+{{/* <fullname>-<suffix>, kept to Kubernetes' 63 characters: a long fullname is cut and given a
+hash of itself, so names stay unique and stable. Takes (dict "root" $ "suffix" "config"). */}}
+{{- define "seshi.suffixed" -}}
+{{- $full := include "seshi.fullname" .root }}
+{{- $name := printf "%s-%s" $full .suffix }}
+{{- if gt (len $name) 63 }}
+{{- $keep := int (sub 63 (add (len .suffix) 10)) }}
+{{- $name = printf "%s-%s-%s" ($full | trunc $keep | trimSuffix "-") ($full | sha256sum | trunc 8) .suffix }}
+{{- end }}
+{{- $name }}
 {{- end }}
 
 {{- define "seshi.labels" -}}
@@ -31,8 +43,8 @@ app.kubernetes.io/component: server
 {{- end }}
 
 {{- define "seshi.selectorLabels" -}}
-app.kubernetes.io/name: {{ include "seshi.name" . }}
-app.kubernetes.io/instance: {{ .Release.Name }}
+app.kubernetes.io/name: {{ include "seshi.name" . | quote }}
+app.kubernetes.io/instance: {{ .Release.Name | quote }}
 app.kubernetes.io/component: server
 {{- end }}
 
@@ -59,12 +71,12 @@ app.kubernetes.io/component: server
 {{- if $c.existingSecret }}
 {{- $c.existingSecret }}
 {{- else if $c.accessKeyId }}
-{{- printf "%s-store" (include "seshi.fullname" .) }}
+{{- include "seshi.suffixed" (dict "root" . "suffix" "store") }}
 {{- end }}
 {{- end }}
 
 {{- define "seshi.dataClaimName" -}}
-{{- default (printf "%s-data" (include "seshi.fullname" .)) .Values.persistence.existingClaim }}
+{{- default (include "seshi.suffixed" (dict "root" . "suffix" "data")) .Values.persistence.existingClaim }}
 {{- end }}
 
 {{/* Refuse values that would render something seshi refuses, or that loses data. */}}
@@ -177,7 +189,7 @@ chart's packs set by the chart. */}}
 {{- define "seshi.configVolume" -}}
 - name: config
   configMap:
-    name: {{ include "seshi.fullname" . }}-config
+    name: {{ include "seshi.suffixed" (dict "root" . "suffix" "config") }}
     items:
       - key: seshi.toml
         path: seshi.toml
@@ -192,7 +204,7 @@ chart's packs set by the chart. */}}
 {{- end }}
 
 {{- define "seshi.bootstrapSecretName" -}}
-{{- default (printf "%s-initial-admin" (include "seshi.fullname" .)) .Values.bootstrap.secretName }}
+{{- default (include "seshi.suffixed" (dict "root" . "suffix" "initial-admin")) .Values.bootstrap.secretName }}
 {{- end }}
 
 {{/* A folder store: file:///data/… or /data/…. */}}

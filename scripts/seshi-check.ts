@@ -124,6 +124,7 @@ interface Volume {
 interface PodSpec {
   enableServiceLinks?: boolean;
   containers: Container[];
+  initContainers?: Container[];
   volumes?: Volume[];
 }
 interface Manifest {
@@ -304,6 +305,43 @@ function checkRefused(): void {
   }
 }
 
+/** Release names Helm accepts that are easy to get wrong: one YAML reads as a boolean, and one
+ * long enough that "<fullname>-<suffix>" would pass Kubernetes' 63 characters. */
+const AWKWARD_RELEASES = ["true", "internal-platform-observability-staging-us-west-2"];
+
+/** Renders the chart under awkward release names, and with a `$(NAME)` in the store URL, which
+ * Kubernetes would expand in args and env unless the chart writes it as `$$(NAME)`. */
+function checkAwkwardInputs(): string[] {
+  const rendered: string[] = [];
+  const values = join(CI_VALUES, "s3-values.yaml");
+  for (const release of AWKWARD_RELEASES) {
+    const out = must(["helm", "template", release, CHART, "-f", values], `release ${release}`);
+    for (const doc of manifests(out)) {
+      const name = doc.metadata?.name ?? "";
+      if (name.length > 63) throw new Error(`release ${release}: ${doc.kind} ${name} is too long`);
+    }
+    rendered.push(out);
+  }
+  const url = "s3://seshi/prod/$(TEAM)";
+  const out = must(
+    ["helm", "template", RELEASE, CHART, "-f", values, "--set", `store.url=${url}`],
+    "$ url",
+  );
+  const docs = manifests(out);
+  const server = podSpec(docs.find((d) => d.kind === "Deployment") ?? {})?.containers[0];
+  if (!server?.args?.includes("store.url=s3://seshi/prod/$$(TEAM)")) {
+    throw new Error(`the server's --set store.url does not escape $: ${server?.args?.join(" ")}`);
+  }
+  const job = podSpec(docs.find((d) => d.kind === "Job") ?? {});
+  for (const container of job?.initContainers ?? []) {
+    const value = container.env?.find((e) => e.name === "STORE_URL")?.value;
+    if (value !== undefined && value !== "s3://seshi/prod/$$(TEAM)") {
+      throw new Error(`the bootstrap's STORE_URL does not escape $: ${value}`);
+    }
+  }
+  return rendered;
+}
+
 function kubeconform(rendered: string[]): boolean {
   if (Bun.which("kubeconform") === null) return false;
   const result = run(["kubeconform", "-strict", "-summary", "-"], rendered.join("\n---\n"));
@@ -330,6 +368,8 @@ if (import.meta.main) {
     }
     checkRefused();
     console.log(`ok refused: ${REFUSED.length} value sets`);
+    rendered.push(...checkAwkwardInputs());
+    console.log(`ok release names ${AWKWARD_RELEASES.join(", ")}; $ in store.url`);
     console.log(kubeconform(rendered) ? "ok kubeconform" : "skipped kubeconform: not on PATH");
   } catch (err) {
     console.error(`seshi-check: ${(err as Error).message}`);

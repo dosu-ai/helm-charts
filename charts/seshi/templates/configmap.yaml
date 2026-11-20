@@ -2,7 +2,7 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: {{ include "seshi.fullname" . }}-config
+  name: {{ include "seshi.suffixed" (dict "root" . "suffix" "config") }}
   labels:
     {{- include "seshi.labels" . | nindent 4 }}
 data:

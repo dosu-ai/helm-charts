@@ -24,8 +24,8 @@ spec:
     - from:
         - podSelector:
             matchLabels:
-              app.kubernetes.io/name: {{ include "seshi.name" . }}
-              app.kubernetes.io/instance: {{ .Release.Name }}
+              app.kubernetes.io/name: {{ include "seshi.name" . | quote }}
+              app.kubernetes.io/instance: {{ .Release.Name | quote }}
               app.kubernetes.io/component: test
       ports:
         - port: http
