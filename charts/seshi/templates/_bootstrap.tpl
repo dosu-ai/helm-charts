@@ -14,20 +14,28 @@ the shell does not expand anything in them. */}}
 {{- printf "%s-bootstrap" (include "seshi.fullname" .) }}
 {{- end }}
 
-{{/* Step 0. The store's identity: what seshi resolves for the settings that pick the bucket,
-and the environment it falls back to for them. */}}
+{{/* Step 0. The store's identity: the bucket URL, endpoint, account and deployment id seshi
+ends up using, with its fallbacks applied in its order (packages/ts/store in seshi): the config's
+endpoint, else R2's own for an r2:// URL with an account, else S3_ENDPOINT, else AWS_ENDPOINT. */}}
 {{- define "seshi.bootstrapStore" -}}
 set -u
 seshi config show --set "store.url=$STORE_URL" >/work/config.txt || exit 1
-{
-  grep -E '^store\.(url|endpoint|account_id|deployment_id) ' /work/config.txt | LC_ALL=C sort
-  for name in S3_ENDPOINT AWS_ENDPOINT R2_ACCOUNT_ID; do
-    printf '%s=%s\n' "$name" "$(printenv "$name" || true)"
-  done
-} >/work/store.txt
+setting() { sed -n "s/^store\.$1 = \"\(.*\)\"\$/\1/p" /work/config.txt; }
+url="$(setting url)"
+account="$(setting account_id)"
+[ -n "$account" ] || account="${R2_ACCOUNT_ID:-}"
+endpoint="$(setting endpoint)"
+if [ -z "$endpoint" ]; then
+  case "$url" in
+    r2://*) [ -n "$account" ] && endpoint="https://$account.r2.cloudflarestorage.com" ;;
+  esac
+fi
+[ -n "$endpoint" ] || endpoint="${S3_ENDPOINT:-${AWS_ENDPOINT:-}}"
+printf 'url=%s\nendpoint=%s\naccount=%s\ndeployment=%s\n' \
+  "$url" "$endpoint" "$account" "$(setting deployment_id)" >/work/store.txt
 sha256sum /work/store.txt | cut -c1-16 >/work/store-id
 rm -f /work/config.txt
-echo "store $(cat /work/store-id): $(grep '^store\.url ' /work/store.txt)"
+echo "store $(cat /work/store-id): $url"
 {{- end }}
 
 {{/* Shell functions the curl steps share. */}}
@@ -40,17 +48,21 @@ secret={{ include "seshi.bootstrapSecretName" . | quote }}
 status_name={{ include "seshi.bootstrapStatusName" . | quote }}
 store="$(cat /work/store-id)"
 # kube <method> <path> [body file]: the HTTP status on stdout, the answer in /work/answer.json.
+# A transfer that curl reports as failed (a cut-off answer, a dropped connection) is 000, never
+# the status line it may have read first.
 kube() {
-  set -- "$1" "$2" "${3:-}"
-  if [ -n "$3" ]; then
-    curl -sS -o /work/answer.json -w '%{http_code}' --cacert "$sa/ca.crt" \
-      -H "Authorization: Bearer $(cat "$sa/token")" -H 'Content-Type: application/json' \
-      -X "$1" --data-binary "@$3" "$api/$2"
+  method="$1" path="$2" body="${3:-}"
+  if [ -n "$body" ]; then
+    set -- -H 'Content-Type: application/json' --data-binary "@$body"
   else
-    curl -sS -o /work/answer.json -w '%{http_code}' --cacert "$sa/ca.crt" \
-      -H "Authorization: Bearer $(cat "$sa/token")" -X "$1" "$api/$2"
+    set --
   fi
+  status="$(curl -sS -o /work/answer.json -w '%{http_code}' --cacert "$sa/ca.crt" \
+    -H "Authorization: Bearer $(cat "$sa/token")" -X "$method" "$@" "$api/$path")" || status=000
+  printf '%s' "$status"
 }
+# The bootstrap's note on the Secret in /work/answer.json: "admin-token-lost" or nothing.
+answer_note() { grep -o '"seshi\.dosu\.ai/bootstrap": *"[a-z-]*"' /work/answer.json | sed 's/.*: *"\(.*\)"/\1/'; }
 # The store id recorded on the object in /work/answer.json, or nothing. The API pretty-prints
 # for curl, so the patterns allow spaces.
 answer_store() { grep -o '"seshi\.dosu\.ai/store": *"[0-9a-f]*"' /work/answer.json | sed 's/.*: *"\(.*\)"/\1/'; }
@@ -75,8 +87,8 @@ JSON
 {{- define "seshi.bootstrapRecovery" -}}
 printf '%s\n' \
   "Make new ones in the server pod and keep them yourself:" \
-  "  kubectl exec deploy/{{ include "seshi.fullname" . }} -- seshi admin init --force --json --set 'store.url=$STORE_URL'            # another admin token" \
-  "  kubectl exec deploy/{{ include "seshi.fullname" . }} -- seshi admin init --rotate-org-key --json --set 'store.url=$STORE_URL'   # a new org key; members sign in again" \
+  "  kubectl -n {{ .Release.Namespace }} exec deploy/{{ include "seshi.fullname" . }} -- seshi admin init --force --json --set {{ include "seshi.shellQuote" (printf "store.url=%s" .Values.store.url) | replace "\\" "\\\\" | replace "\"" "\\\"" | replace "$" "\\$" | replace "`" "\\`" }}   # another admin token" \
+  "  kubectl -n {{ .Release.Namespace }} exec deploy/{{ include "seshi.fullname" . }} -- seshi admin init --rotate-org-key --json --set {{ include "seshi.shellQuote" (printf "store.url=%s" .Values.store.url) | replace "\\" "\\\\" | replace "\"" "\\\"" | replace "$" "\\$" | replace "`" "\\`" }}   # a new org key; members sign in again" \
   "Then revoke the lost admin token (seshi tokens list, seshi tokens revoke)." >&2
 {{- end }}
 
@@ -87,6 +99,11 @@ code="$(kube GET "secrets/$secret")"
 case "$code" in
   200)
     if [ "$(answer_store)" = "$store" ]; then
+      if [ "$(answer_note)" = admin-token-lost ]; then
+        echo "$secret holds only the org key: an earlier bootstrap lost the store's first admin token." >&2
+        {{- include "seshi.bootstrapRecovery" . | nindent 8 }}
+        exit 1
+      fi
       echo "$secret already holds this store's first tokens"
       touch /work/done
       exit 0
@@ -163,16 +180,19 @@ if [ -n "$admin" ]; then
   add admin-owner "$BOOTSTRAP_OWNER"
 fi
 add org-key "$org"
+note=""
+if [ -z "$admin" ] && [ -e /work/was-minting ]; then note=admin-token-lost; fi
 cat >/work/secret.json <<JSON
-{"apiVersion":"v1","kind":"Secret","type":"Opaque","metadata":{"name":"$secret","annotations":{"seshi.dosu.ai/store":"$store"},"labels":{"app.kubernetes.io/instance":{{ .Release.Name | quote }},"app.kubernetes.io/component":"bootstrap"}},"data":{$data}}
+{"apiVersion":"v1","kind":"Secret","type":"Opaque","metadata":{"name":"$secret","annotations":{"seshi.dosu.ai/store":"$store","seshi.dosu.ai/bootstrap":"$note"},"labels":{"app.kubernetes.io/instance":{{ .Release.Name | quote }},"app.kubernetes.io/component":"bootstrap"}},"data":{$data}}
 JSON
-# Is the Secret in /work/answer.json exactly the one this step would make?
+# Is the Secret in /work/answer.json exactly the one this step would make: the same store, the
+# same note, and the same data, key for key? The API pretty-prints, with .data at two spaces.
 same_secret() {
-  [ "$(answer_store)" = "$store" ] || return 1
-  for pair in $expect; do
-    grep -q "\"${pair%%=*}\": *\"${pair#*=}\"" /work/answer.json || return 1
-  done
-  return 0
+  [ "$(answer_store)" = "$store" ] && [ "$(answer_note)" = "$note" ] || return 1
+  got="$(sed -n '/^  "data": {/,/^  }/p' /work/answer.json | grep -o '"[^"]*": *"[^"]*"' |
+    sed 's/": *"/=/; s/"//g' | LC_ALL=C sort)"
+  want="$(printf '%s\n' $expect | LC_ALL=C sort)"
+  [ "$got" = "$want" ]
 }
 saved=""
 for _ in $(seq 1 30); do
@@ -194,7 +214,7 @@ if [ -z "$saved" ]; then
   exit 1
 fi
 echo "saved the first tokens in $secret"
-if [ -z "$admin" ] && [ -e /work/was-minting ]; then
+if [ "$note" = admin-token-lost ]; then
   set_status admin-token-lost || true
   echo "An earlier attempt made the store's first admin token but never saved it; $secret holds only the org key." >&2
   {{- include "seshi.bootstrapRecovery" . | nindent 2 }}

@@ -199,3 +199,8 @@ chart's packs set by the chart. */}}
 {{- define "seshi.folderStore" -}}
 {{- if or (hasPrefix "file:" .Values.store.url) (hasPrefix "/" .Values.store.url) }}true{{ end }}
 {{- end }}
+
+{{/* A value as one single-quoted shell word: 'team'\''s' for team's. */}}
+{{- define "seshi.shellQuote" -}}
+{{- printf "'%s'" (replace "'" "'\\''" .) }}
+{{- end }}

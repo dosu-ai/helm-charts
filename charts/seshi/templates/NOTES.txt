@@ -28,7 +28,7 @@ delete the Secret when you like; seshi does not read it.
 
 Make the store's first admin token{{ if $orgKey }} and org key{{ end }} once, in the server pod:
 
-  kubectl -n {{ .Release.Namespace }} exec deploy/{{ include "seshi.fullname" . }} -- seshi admin init --json --set {{ printf "store.url=%s" .Values.store.url | squote }}
+  kubectl -n {{ .Release.Namespace }} exec deploy/{{ include "seshi.fullname" . }} -- seshi admin init --json --set {{ include "seshi.shellQuote" (printf "store.url=%s" .Values.store.url) }}
 
 A second `admin init` exits 6: the store already has an admin.
 {{- end }}

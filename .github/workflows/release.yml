@@ -58,16 +58,19 @@ jobs:
               echo "::error::listing $registry/$name: $(cat /tmp/packages.err)"
               exit 1
             fi
-            if printf '%s\n' "$tags" | grep -qx "$version"; then
+            # OCI tags cannot hold "+", so Helm stores 1.0.0+build as 1.0.0_build.
+            if printf '%s\n' "$tags" | grep -Fxq "$(printf '%s' "$version" | tr + _)"; then
               echo "$registry/$name:$version is published"
             else
               helm push "$package" "$registry"
             fi
 
             # The tag and the GitHub release, with the package attached and fully uploaded (an
-            # upload cut short leaves an empty asset in the "starter" state).
+            # upload cut short leaves an empty asset in the "starter" state). The release starts
+            # as a draft and is published once its package is there, so it is never public, or
+            # immutable, without it.
             if ! gh release view "$tag" >/dev/null 2>&1; then
-              gh release create "$tag" --target "$GITHUB_SHA" --title "$name $version" \
+              gh release create "$tag" --draft --target "$GITHUB_SHA" --title "$name $version" \
                 --notes "helm install $name $registry/$name --version $version (see charts/$name/README.md)"
             fi
             asset="$(gh release view "$tag" --json assets \
@@ -79,6 +82,9 @@ jobs:
                 gh release upload "$tag" "$package"
                 ;;
             esac
+            if [ "$(gh release view "$tag" --json isDraft --jq .isDraft)" = true ]; then
+              gh release edit "$tag" --draft=false
+            fi
 
             # A new GHCR package starts private, and GitHub's API cannot change that: an org
             # admin makes it public once, in the package's settings.

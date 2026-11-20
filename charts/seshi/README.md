@@ -102,7 +102,8 @@ failure, or the Job giving up after its retries) loses them with it; the next ru
   after an attempt that never finished: one recorded as `minting`, or one in the same pod. The
   Job fails, and its log gives the commands that make new tokens in the server pod
   (`seshi admin init --force`, `--rotate-org-key`). When only the admin token was lost, the
-  Secret holds the org key and the ConfigMap says `admin-token-lost`.
+  Secret holds the org key, carries `seshi.dosu.ai/bootstrap: admin-token-lost`, and the Job
+  refuses it on every later install until you replace it.
 - **Not on upgrade.** The Job runs on `helm install` only. Turning `bootstrap.enabled` on later
   does nothing; run `seshi admin init` in the server pod instead.
 - **Not for a folder store.** The server pod holds the claim, so make the tokens there.
