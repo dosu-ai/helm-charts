@@ -1,0 +1,214 @@
+{{- if .Values.bootstrap.enabled }}
+{{- $name := printf "%s-bootstrap" (include "seshi.fullname" .) }}
+{{- $secret := include "seshi.bootstrapSecretName" . }}
+# The first admin token and the org key, made once after the first install: an init container
+# runs `seshi admin init` against the bucket and writes the manifests, then kubectl applies
+# them. The Secret is not part of the release, so it outlives an uninstall, like the bucket's
+# admin it belongs to. A bucket that already has an admin is left alone (admin init exits 6).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "seshi.releaseLabels" . | nindent 4 }}
+    app.kubernetes.io/component: bootstrap
+  annotations:
+    helm.sh/hook: post-install
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "seshi.releaseLabels" . | nindent 4 }}
+    app.kubernetes.io/component: bootstrap
+  annotations:
+    helm.sh/hook: post-install
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+rules:
+  # kubectl apply reads, then creates or patches. Create cannot be limited to a name.
+  - apiGroups: [""]
+    resources: [secrets, configmaps]
+    verbs: [create]
+  - apiGroups: [""]
+    resources: [secrets, configmaps]
+    resourceNames: [{{ $secret | quote }}, {{ $name | quote }}]
+    verbs: [get, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "seshi.releaseLabels" . | nindent 4 }}
+    app.kubernetes.io/component: bootstrap
+  annotations:
+    helm.sh/hook: post-install
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $name }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $name }}
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "seshi.releaseLabels" . | nindent 4 }}
+    app.kubernetes.io/component: bootstrap
+  annotations:
+    helm.sh/hook: post-install
+    helm.sh/hook-weight: "0"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        {{- include "seshi.releaseLabels" . | nindent 8 }}
+        app.kubernetes.io/component: bootstrap
+    spec:
+      restartPolicy: Never
+      enableServiceLinks: false
+      serviceAccountName: {{ $name }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      initContainers:
+        - name: admin-init
+          image: {{ include "seshi.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -u
+              out=/work/manifests
+              mkdir -p "$out"
+              status() {
+                cat >"$out/status.yaml" <<YAML
+              apiVersion: v1
+              kind: ConfigMap
+              metadata:
+                name: {{ $name }}
+                labels: { app.kubernetes.io/instance: {{ .Release.Name | quote }}, app.kubernetes.io/component: bootstrap }
+              data:
+                status: "$1"
+                secret: {{ $secret | quote }}
+              YAML
+              }
+              json="$(seshi admin init --json --owner {{ .Values.bootstrap.owner | quote }})"
+              code=$?
+              if [ "$code" -eq 6 ]; then
+                echo "seshi already has an admin: {{ $secret }} is left as it is"
+                status already-initialized
+                exit 0
+              fi
+              if [ "$code" -ne 0 ]; then
+                echo "seshi admin init exited $code" >&2
+                exit "$code"
+              fi
+              token() { printf '%s\n' "$json" | sed -n "/\"$1\": {/,/}/s/^ *\"token\": \"\([A-Za-z0-9_-]*\)\".*/\1/p"; }
+              admin="$(token admin)"
+              org="$(token org_key)"
+              if [ -z "$admin" ]; then
+                echo "seshi admin init gave no admin token" >&2
+                exit 1
+              fi
+              cat >"$out/secret.yaml" <<YAML
+              apiVersion: v1
+              kind: Secret
+              metadata:
+                name: {{ $secret }}
+                labels: { app.kubernetes.io/instance: {{ .Release.Name | quote }}, app.kubernetes.io/component: bootstrap }
+              type: Opaque
+              stringData:
+                admin-token: "$admin"
+                admin-owner: {{ .Values.bootstrap.owner | quote }}
+              YAML
+              if [ -n "$org" ]; then printf '  org-key: "%s"\n' "$org" >>"$out/secret.yaml"; fi
+              status initialized
+              echo "wrote the first admin token to {{ $secret }}"
+          env:
+            {{- include "seshi.env" . | nindent 12 }}
+          {{- with .Values.envFrom }}
+          envFrom:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          {{- with .Values.bootstrap.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/seshi
+              readOnly: true
+            - name: data
+              mountPath: /data
+            - name: tmp
+              mountPath: /tmp
+            - name: work
+              mountPath: /work
+            {{- with .Values.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+      containers:
+        - name: apply
+          image: {{ .Values.bootstrap.kubectlImage | quote }}
+          imagePullPolicy: IfNotPresent
+          args: ["apply", "--server-side", "--field-manager=seshi-bootstrap", "-f", "/work/manifests"]
+          env:
+            # kubectl keeps its discovery cache under $HOME.
+            - name: HOME
+              value: /tmp
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          {{- with .Values.bootstrap.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: work
+              mountPath: /work
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        {{- include "seshi.configVolume" . | nindent 8 }}
+        - name: data
+          {{- if include "seshi.folderStore" . }}
+          persistentVolumeClaim:
+            claimName: {{ include "seshi.dataClaimName" . }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        - name: tmp
+          emptyDir: {}
+        - name: work
+          emptyDir: {}
+        {{- with .Values.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

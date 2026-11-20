@@ -1,0 +1,52 @@
+name: release
+
+# A chart whose version is not yet in the registry is packaged and pushed to
+# oci://ghcr.io/dosu-ai/charts/<chart>, tagged <chart>-<version>, and given a GitHub release.
+# A merge that does not change a chart's version publishes nothing for it.
+on:
+  push:
+    branches: [main]
+    paths: ["charts/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # the tag and the GitHub release
+      packages: write # ghcr.io/dosu-ai/charts
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: azure/setup-helm@2f5e7bc67f1f9972ab16657bb795f36d8f04de0e # v5.1.0
+        with:
+          version: v4.3.2
+      - name: Package and push new chart versions
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REGISTRY: oci://ghcr.io/${{ github.repository_owner }}/charts
+        run: |
+          echo "$GH_TOKEN" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
+          mkdir -p dist
+          for chart in charts/*/; do
+            chart="${chart%/}"
+            name="$(sed -n 's/^name: //p' "$chart/Chart.yaml")"
+            version="$(sed -n 's/^version: //p' "$chart/Chart.yaml")"
+            if helm show chart "$REGISTRY/$name" --version "$version" >/dev/null 2>&1; then
+              echo "$name $version is already published"
+              continue
+            fi
+            helm package "$chart" --destination dist
+            helm push "dist/$name-$version.tgz" "$REGISTRY"
+            gh release create "$name-$version" "dist/$name-$version.tgz" \
+              --target "$GITHUB_SHA" --title "$name $version" \
+              --notes "helm install $name $REGISTRY/$name --version $version"
+          done

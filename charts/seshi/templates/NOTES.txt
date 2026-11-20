@@ -1,0 +1,33 @@
+seshi {{ .Chart.AppVersion }} is starting as {{ include "seshi.fullname" . }} in {{ .Release.Namespace }}.
+
+In the cluster it answers at http://{{ include "seshi.fullname" . }}.{{ .Release.Namespace }}.svc:{{ .Values.service.port }}.
+{{- if .Values.ingress.enabled }}
+{{- range .Values.ingress.hosts }}
+Outside it: http{{ if $.Values.ingress.tls }}s{{ end }}://{{ .host }}
+{{- end }}
+{{- else }}
+From here: kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "seshi.fullname" . }} 7200:{{ .Values.service.port }}
+{{- end }}
+
+{{- if .Values.bootstrap.enabled }}
+The first admin token and the org key are in the Secret {{ include "seshi.bootstrapSecretName" . }}
+(made once, on first install, by the {{ include "seshi.fullname" . }}-bootstrap Job):
+
+  kubectl -n {{ .Release.Namespace }} get secret {{ include "seshi.bootstrapSecretName" . }} -o jsonpath='{.data.admin-token}' | base64 -d
+  kubectl -n {{ .Release.Namespace }} get secret {{ include "seshi.bootstrapSecretName" . }} -o jsonpath='{.data.org-key}' | base64 -d
+
+Members sign in with `seshi login --server <url> --key <org key>`. Move the tokens somewhere
+safe and delete the Secret when you like; seshi does not read it. With an IdP, add
+config.auth.oidc and sign in through it instead.
+{{- else }}
+Make the first admin token and the org key once:
+
+  kubectl -n {{ .Release.Namespace }} exec deploy/{{ include "seshi.fullname" . }} -- seshi admin init --json
+
+A second `admin init` exits 6: the bucket already has an admin.
+{{- end }}
+{{- if not .Values.persistence.enabled }}
+
+The search index is on an emptyDir: after each restart, search answers 503 index_building
+until it is rebuilt from the bucket. persistence.enabled keeps it.
+{{- end }}
