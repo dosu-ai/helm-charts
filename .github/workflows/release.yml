@@ -47,23 +47,38 @@ jobs:
             helm package "$chart" --destination dist >/dev/null
             package="dist/$name-$version.tgz"
 
-            # The registry: push unless this version is there. Anything but "not found" stops.
-            if out="$(helm show chart "$registry/$name" --version "$version" 2>&1)"; then
-              echo "$registry/$name:$version is published"
-            elif printf '%s' "$out" | grep -qiE 'not found|manifest unknown|name unknown'; then
-              helm push "$package" "$registry"
+            # The registry: push unless GitHub lists this version's tag on the package. The
+            # package not existing yet (404) means no version of it is published.
+            if tags="$(gh api --paginate "orgs/$OWNER/packages/container/charts%2F$name/versions" \
+              --jq '.[].metadata.container.tags[]' 2>/tmp/packages.err)"; then
+              :
+            elif grep -q 'HTTP 404' /tmp/packages.err; then
+              tags=""
             else
-              echo "::error::checking $registry/$name:$version: $out"
+              echo "::error::listing $registry/$name: $(cat /tmp/packages.err)"
               exit 1
             fi
-
-            # The tag and the GitHub release, with the package attached.
-            if ! gh release view "$tag" >/dev/null 2>&1; then
-              gh release create "$tag" "$package" --target "$GITHUB_SHA" --title "$name $version" \
-                --notes "helm install $name $registry/$name --version $version (see charts/$name/README.md)"
-            elif ! gh release view "$tag" --json assets --jq '.assets[].name' | grep -qx "$name-$version.tgz"; then
-              gh release upload "$tag" "$package"
+            if printf '%s\n' "$tags" | grep -qx "$version"; then
+              echo "$registry/$name:$version is published"
+            else
+              helm push "$package" "$registry"
             fi
+
+            # The tag and the GitHub release, with the package attached and fully uploaded (an
+            # upload cut short leaves an empty asset in the "starter" state).
+            if ! gh release view "$tag" >/dev/null 2>&1; then
+              gh release create "$tag" --target "$GITHUB_SHA" --title "$name $version" \
+                --notes "helm install $name $registry/$name --version $version (see charts/$name/README.md)"
+            fi
+            asset="$(gh release view "$tag" --json assets \
+              --jq ".assets[] | select(.name == \"$name-$version.tgz\") | \"\(.state) \(.size)\"")"
+            case "$asset" in
+              "uploaded "[1-9]*) echo "$tag has its package" ;;
+              *)
+                [ -n "$asset" ] && gh release delete-asset "$tag" "$name-$version.tgz" --yes
+                gh release upload "$tag" "$package"
+                ;;
+            esac
 
             # A new GHCR package starts private, and GitHub's API cannot change that: an org
             # admin makes it public once, in the package's settings.

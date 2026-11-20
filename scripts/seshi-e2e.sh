@@ -66,7 +66,7 @@ k -n "$NS" create secret generic seshi-store \
 
 echo "--- install"
 h install "$RELEASE" "$ROOT/charts/seshi" -n "$NS" \
-  -f "$ROOT/charts/seshi/ci/kind-values.yaml" "$@" --wait --timeout 5m ||
+  -f "$ROOT/charts/seshi/ci/kind-values.yaml" --wait --timeout 5m ||
   fail "h install did not become ready"
 h test "$RELEASE" -n "$NS" || fail "h test failed"
 

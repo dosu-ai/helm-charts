@@ -21,14 +21,14 @@ On first install, the {{ include "seshi.bootstrapStatusName" . }} Job saves the 
 Members sign in with `seshi login --server <url> --key <org key>`.
 {{- end }}
 
-If the store already had an admin, the Secret is not written: the ConfigMap
-{{ include "seshi.bootstrapStatusName" . }} says already-initialized. Move the tokens somewhere safe and
+If the store already had an admin, the Secret is not written and the ConfigMap
+{{ include "seshi.bootstrapStatusName" . }} says already-initialized (or the Secret holds only a new org key). Move the tokens somewhere safe and
 delete the Secret when you like; seshi does not read it.
 {{- else }}
 
 Make the store's first admin token{{ if $orgKey }} and org key{{ end }} once, in the server pod:
 
-  kubectl -n {{ .Release.Namespace }} exec deploy/{{ include "seshi.fullname" . }} -- seshi admin init --json
+  kubectl -n {{ .Release.Namespace }} exec deploy/{{ include "seshi.fullname" . }} -- seshi admin init --json --set {{ printf "store.url=%s" .Values.store.url | squote }}
 
 A second `admin init` exits 6: the store already has an admin.
 {{- end }}

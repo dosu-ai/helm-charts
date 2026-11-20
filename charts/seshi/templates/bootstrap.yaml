@@ -1,15 +1,11 @@
 {{- if and .Values.bootstrap.enabled (not (include "seshi.folderStore" .)) }}
 {{- $name := include "seshi.bootstrapStatusName" . }}
 {{- $secret := include "seshi.bootstrapSecretName" . }}
+{{- $scriptEnv := list (dict "name" "STORE_URL" "value" .Values.store.url) (dict "name" "BOOTSTRAP_OWNER" "value" .Values.bootstrap.owner) }}
 # The first admin token and the org key, made once after the first install and kept in the
-# Secret <release>-initial-admin (README.md, "First tokens"). Three steps share /work:
-#   check      (curl)  the Secret already holds this store's tokens: nothing to do. It holds
-#                      another store's: stop before making any. Else record "minting".
-#   admin-init (seshi) `seshi admin init`. "Already set up" after an earlier "minting" means
-#                      tokens were made and lost: stop, and say how to make new ones.
-#   save       (curl)  create the Secret, retrying in this pod, then record "initialized".
-# The Secret and the status ConfigMap are not part of the release: they outlive an uninstall,
-# like the store's admin they belong to.
+# Secret <release>-initial-admin (README.md, "First tokens"). The steps and their scripts are in
+# templates/_bootstrap.tpl. The Secret and the status ConfigMap are not part of the release:
+# they outlive an uninstall, like the store's admin they belong to.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -41,7 +37,7 @@ rules:
   - apiGroups: [""]
     resources: [secrets]
     resourceNames: [{{ $secret | quote }}]
-    verbs: [get, update]
+    verbs: [get]
   - apiGroups: [""]
     resources: [configmaps]
     verbs: [create]
@@ -101,6 +97,37 @@ spec:
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
       initContainers:
+        - name: store
+          image: {{ include "seshi.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              {{- include "seshi.bootstrapStore" . | nindent 14 }}
+          env:
+            {{- include "seshi.env" . | nindent 12 }}
+            {{- toYaml $scriptEnv | nindent 12 }}
+          {{- with .Values.envFrom }}
+          envFrom:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          {{- with .Values.bootstrap.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/seshi
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+            - name: work
+              mountPath: /work
+            {{- with .Values.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
         - name: check
           image: {{ .Values.bootstrap.curlImage | quote }}
           imagePullPolicy: IfNotPresent
@@ -126,6 +153,7 @@ spec:
               {{- include "seshi.bootstrapInit" . | nindent 14 }}
           env:
             {{- include "seshi.env" . | nindent 12 }}
+            {{- toYaml $scriptEnv | nindent 12 }}
           {{- with .Values.envFrom }}
           envFrom:
             {{- toYaml . | nindent 12 }}
@@ -157,6 +185,8 @@ spec:
           args:
             - |
               {{- include "seshi.bootstrapSave" . | nindent 14 }}
+          env:
+            {{- toYaml $scriptEnv | nindent 12 }}
           securityContext:
             {{- toYaml .Values.securityContext | nindent 12 }}
           {{- with .Values.bootstrap.resources }}

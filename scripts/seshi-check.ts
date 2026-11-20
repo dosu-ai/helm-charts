@@ -56,6 +56,11 @@ const REFUSED: { name: string; args: string[]; error: string }[] = [
     error: "must be under /data",
   },
   {
+    name: "a folder store with a control character in its path",
+    args: ["--set", "store.url=file:///data/.\t./tmp/seshi", "--set", "persistence.enabled=true"],
+    error: "must be under /data",
+  },
+  {
     name: "a service owner for the first admin",
     args: [...S3, "--set", "bootstrap.owner=svc:thing"],
     error: "svc:thing",
