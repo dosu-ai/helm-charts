@@ -1,7 +1,8 @@
 {{- if and .Values.bootstrap.enabled (not (include "seshi.folderStore" .)) }}
 {{- $name := include "seshi.bootstrapStatusName" . }}
 {{- $secret := include "seshi.bootstrapSecretName" . }}
-{{- $scriptEnv := list (dict "name" "STORE_URL" "value" .Values.store.url) (dict "name" "BOOTSTRAP_OWNER" "value" .Values.bootstrap.owner) }}
+{{- /* Kubernetes expands $(NAME) in env values; $$ keeps a $ in the URL literal. */}}
+{{- $scriptEnv := list (dict "name" "STORE_URL" "value" (replace "$" "$$" .Values.store.url)) (dict "name" "BOOTSTRAP_OWNER" "value" .Values.bootstrap.owner) }}
 # The first admin token and the org key, made once after the first install and kept in the
 # Secret <release>-initial-admin (README.md, "First tokens"). The steps and their scripts are in
 # templates/_bootstrap.tpl. The Secret and the status ConfigMap are not part of the release:
@@ -135,6 +136,8 @@ spec:
           args:
             - |
               {{- include "seshi.bootstrapCheck" . | nindent 14 }}
+          env:
+            {{- toYaml $scriptEnv | nindent 12 }}
           securityContext:
             {{- toYaml .Values.securityContext | nindent 12 }}
           {{- with .Values.bootstrap.resources }}

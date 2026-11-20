@@ -60,7 +60,8 @@ spec:
             - --roles
             - api,worker
             - --set
-            - {{ printf "store.url=%s" .Values.store.url | quote }}
+            # Kubernetes expands $(NAME) in args; $$ keeps a $ in the URL as seshi.toml has it.
+            - {{ printf "store.url=%s" .Values.store.url | replace "$" "$$" | quote }}
           ports:
             - name: http
               containerPort: 7200

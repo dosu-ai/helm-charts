@@ -82,7 +82,8 @@ jobs:
                 gh release upload "$tag" "$package"
                 ;;
             esac
-            if [ "$(gh release view "$tag" --json isDraft --jq .isDraft)" = true ]; then
+            draft="$(gh release view "$tag" --json isDraft --jq .isDraft)"
+            if [ "$draft" = true ]; then
               gh release edit "$tag" --draft=false
             fi
 

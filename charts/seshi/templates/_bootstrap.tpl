@@ -15,22 +15,27 @@ the shell does not expand anything in them. */}}
 {{- end }}
 
 {{/* Step 0. The store's identity: the bucket URL, endpoint, account and deployment id seshi
-ends up using, with its fallbacks applied in its order (packages/ts/store in seshi): the config's
-endpoint, else R2's own for an r2:// URL with an account, else S3_ENDPOINT, else AWS_ENDPOINT. */}}
+ends up using, in seshi's own order (packages/ts/store/src/open.ts and s3.ts): the config's
+endpoint; else S3_ENDPOINT when it is set at all, even empty; else R2's own endpoint for an
+r2:// URL with an account; else AWS_ENDPOINT. The account is the config's, else R2_ACCOUNT_ID
+when set. */}}
 {{- define "seshi.bootstrapStore" -}}
 set -u
 seshi config show --set "store.url=$STORE_URL" >/work/config.txt || exit 1
+has() { grep -q "^store\.$1 = " /work/config.txt; }
 setting() { sed -n "s/^store\.$1 = \"\(.*\)\"\$/\1/p" /work/config.txt; }
 url="$(setting url)"
-account="$(setting account_id)"
-[ -n "$account" ] || account="${R2_ACCOUNT_ID:-}"
-endpoint="$(setting endpoint)"
-if [ -z "$endpoint" ]; then
-  case "$url" in
-    r2://*) [ -n "$account" ] && endpoint="https://$account.r2.cloudflarestorage.com" ;;
+if has account_id; then account="config:$(setting account_id)"
+elif [ "${R2_ACCOUNT_ID+set}" = set ]; then account="config:$R2_ACCOUNT_ID"
+else account=unset; fi
+if has endpoint; then endpoint="$(setting endpoint)"
+elif [ "${S3_ENDPOINT+set}" = set ]; then endpoint="$S3_ENDPOINT"
+else
+  case "$url:$account" in
+    r2://*:config:?*) endpoint="https://${account#config:}.r2.cloudflarestorage.com" ;;
+    *) if [ "${AWS_ENDPOINT+set}" = set ]; then endpoint="$AWS_ENDPOINT"; else endpoint="(default)"; fi ;;
   esac
 fi
-[ -n "$endpoint" ] || endpoint="${S3_ENDPOINT:-${AWS_ENDPOINT:-}}"
 printf 'url=%s\nendpoint=%s\naccount=%s\ndeployment=%s\n' \
   "$url" "$endpoint" "$account" "$(setting deployment_id)" >/work/store.txt
 sha256sum /work/store.txt | cut -c1-16 >/work/store-id
@@ -62,10 +67,10 @@ kube() {
   printf '%s' "$status"
 }
 # The bootstrap's note on the Secret in /work/answer.json: "admin-token-lost" or nothing.
-answer_note() { grep -o '"seshi\.dosu\.ai/bootstrap": *"[a-z-]*"' /work/answer.json | sed 's/.*: *"\(.*\)"/\1/'; }
+answer_note() { grep -o '"seshi\.dosu\.ai/bootstrap": *"[^"]*"' /work/answer.json | sed 's/.*: *"\(.*\)"/\1/'; }
 # The store id recorded on the object in /work/answer.json, or nothing. The API pretty-prints
 # for curl, so the patterns allow spaces.
-answer_store() { grep -o '"seshi\.dosu\.ai/store": *"[0-9a-f]*"' /work/answer.json | sed 's/.*: *"\(.*\)"/\1/'; }
+answer_store() { grep -o '"seshi\.dosu\.ai/store": *"[^"]*"' /work/answer.json | sed 's/.*: *"\(.*\)"/\1/'; }
 # Records the bootstrap's state in the status ConfigMap, creating it the first time.
 set_status() {
   cat >/work/status.json <<JSON
@@ -83,12 +88,14 @@ JSON
 }
 {{- end }}
 
-{{/* The commands that make new tokens by hand, in the server pod. */}}
+{{/* The commands that make new tokens by hand, in the server pod, with STORE_URL as one
+shell-quoted word. */}}
 {{- define "seshi.bootstrapRecovery" -}}
+word="'$(printf '%s' "store.url=$STORE_URL" | sed "s/'/'\\\\''/g")'"
 printf '%s\n' \
   "Make new ones in the server pod and keep them yourself:" \
-  "  kubectl -n {{ .Release.Namespace }} exec deploy/{{ include "seshi.fullname" . }} -- seshi admin init --force --json --set {{ include "seshi.shellQuote" (printf "store.url=%s" .Values.store.url) | replace "\\" "\\\\" | replace "\"" "\\\"" | replace "$" "\\$" | replace "`" "\\`" }}   # another admin token" \
-  "  kubectl -n {{ .Release.Namespace }} exec deploy/{{ include "seshi.fullname" . }} -- seshi admin init --rotate-org-key --json --set {{ include "seshi.shellQuote" (printf "store.url=%s" .Values.store.url) | replace "\\" "\\\\" | replace "\"" "\\\"" | replace "$" "\\$" | replace "`" "\\`" }}   # a new org key; members sign in again" \
+  "  kubectl -n {{ .Release.Namespace }} exec deploy/{{ include "seshi.fullname" . }} -- seshi admin init --force --json --set $word   # another admin token" \
+  "  kubectl -n {{ .Release.Namespace }} exec deploy/{{ include "seshi.fullname" . }} -- seshi admin init --rotate-org-key --json --set $word   # a new org key; members sign in again" \
   "Then revoke the lost admin token (seshi tokens list, seshi tokens revoke)." >&2
 {{- end }}
 
