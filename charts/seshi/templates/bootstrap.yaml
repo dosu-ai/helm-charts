@@ -1,0 +1,224 @@
+{{- if and .Values.bootstrap.enabled (not (include "seshi.folderStore" .)) }}
+{{- $name := include "seshi.bootstrapStatusName" . }}
+{{- $secret := include "seshi.bootstrapSecretName" . }}
+{{- /* Kubernetes expands $(NAME) in env values; $$ keeps a $ in the URL literal. */}}
+{{- $scriptEnv := list (dict "name" "STORE_URL" "value" (replace "$" "$$" .Values.store.url)) (dict "name" "BOOTSTRAP_OWNER" "value" .Values.bootstrap.owner) }}
+# The first admin token and the org key, made once after the first install and kept in the
+# Secret <release>-initial-admin (README.md, "First tokens"). The steps and their scripts are in
+# templates/_bootstrap.tpl. The Secret and the status ConfigMap are not part of the release:
+# they outlive an uninstall, like the store's admin they belong to.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "seshi.releaseLabels" . | nindent 4 }}
+    app.kubernetes.io/component: bootstrap
+  annotations:
+    helm.sh/hook: post-install
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "seshi.releaseLabels" . | nindent 4 }}
+    app.kubernetes.io/component: bootstrap
+  annotations:
+    helm.sh/hook: post-install
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+rules:
+  # Create cannot be limited to a name; reading and replacing are.
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [create]
+  - apiGroups: [""]
+    resources: [secrets]
+    resourceNames: [{{ $secret | quote }}]
+    verbs: [get]
+  - apiGroups: [""]
+    resources: [configmaps]
+    verbs: [create]
+  - apiGroups: [""]
+    resources: [configmaps]
+    resourceNames: [{{ $name | quote }}]
+    verbs: [get, update]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "seshi.releaseLabels" . | nindent 4 }}
+    app.kubernetes.io/component: bootstrap
+  annotations:
+    helm.sh/hook: post-install
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $name }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $name }}
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "seshi.releaseLabels" . | nindent 4 }}
+    app.kubernetes.io/component: bootstrap
+  annotations:
+    helm.sh/hook: post-install
+    helm.sh/hook-weight: "0"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 6
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        {{- include "seshi.releaseLabels" . | nindent 8 }}
+        app.kubernetes.io/component: bootstrap
+    spec:
+      # A failed step restarts in this pod, which keeps /work and the tokens in it.
+      restartPolicy: OnFailure
+      enableServiceLinks: false
+      serviceAccountName: {{ $name }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      initContainers:
+        - name: store
+          image: {{ include "seshi.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              {{- include "seshi.bootstrapStore" . | nindent 14 }}
+          env:
+            {{- include "seshi.env" . | nindent 12 }}
+            {{- toYaml $scriptEnv | nindent 12 }}
+          {{- with .Values.envFrom }}
+          envFrom:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          {{- with .Values.bootstrap.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/seshi
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+            - name: work
+              mountPath: /work
+            {{- with .Values.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+        - name: check
+          image: {{ .Values.bootstrap.curlImage | quote }}
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              {{- include "seshi.bootstrapCheck" . | nindent 14 }}
+          env:
+            {{- toYaml $scriptEnv | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          {{- with .Values.bootstrap.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: work
+              mountPath: /work
+        - name: admin-init
+          image: {{ include "seshi.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              {{- include "seshi.bootstrapInit" . | nindent 14 }}
+          env:
+            {{- include "seshi.env" . | nindent 12 }}
+            {{- toYaml $scriptEnv | nindent 12 }}
+          {{- with .Values.envFrom }}
+          envFrom:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          {{- with .Values.bootstrap.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/seshi
+              readOnly: true
+            - name: data
+              mountPath: /data
+            - name: tmp
+              mountPath: /tmp
+            - name: work
+              mountPath: /work
+            {{- with .Values.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+      containers:
+        - name: save
+          image: {{ .Values.bootstrap.curlImage | quote }}
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              {{- include "seshi.bootstrapSave" . | nindent 14 }}
+          env:
+            {{- toYaml $scriptEnv | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          {{- with .Values.bootstrap.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: work
+              mountPath: /work
+      volumes:
+        {{- include "seshi.configVolume" . | nindent 8 }}
+        # admin init needs a /data, not the server's: the store is a bucket here.
+        - name: data
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+        - name: work
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Mi
+        {{- with .Values.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

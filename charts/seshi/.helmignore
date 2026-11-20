@@ -1,0 +1,5 @@
+.DS_Store
+*.swp
+*.tmp
+# Values files for the chart's own checks (scripts/seshi-check.ts), not for installs.
+ci/

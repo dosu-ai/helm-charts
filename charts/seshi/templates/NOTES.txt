@@ -1,0 +1,39 @@
+seshi {{ .Chart.AppVersion }} is starting as {{ include "seshi.fullname" . }} in {{ .Release.Namespace }}.
+
+In the cluster it answers at http://{{ include "seshi.fullname" . }}.{{ .Release.Namespace }}.svc:{{ .Values.service.port }}.
+{{- if .Values.ingress.enabled }}
+{{- range .Values.ingress.hosts }}
+Outside it: http{{ if $.Values.ingress.tls }}s{{ end }}://{{ .host }}
+{{- end }}
+{{- else }}
+From here: kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "seshi.fullname" . }} 7200:{{ .Values.service.port }}
+{{- end }}
+{{- $orgKey := dig "auth" "org_key" "enabled" true (.Values.config | default dict) }}
+{{- if and .Values.bootstrap.enabled (not (include "seshi.folderStore" .)) }}
+
+On first install, the {{ include "seshi.bootstrapStatusName" . }} Job saves the store's first admin token
+{{- if $orgKey }} and the org key{{ end }} in the Secret {{ include "seshi.bootstrapSecretName" . }}:
+
+  kubectl -n {{ .Release.Namespace }} get secret {{ include "seshi.bootstrapSecretName" . }} -o jsonpath='{.data.admin-token}' | base64 -d
+{{- if $orgKey }}
+  kubectl -n {{ .Release.Namespace }} get secret {{ include "seshi.bootstrapSecretName" . }} -o jsonpath='{.data.org-key}' | base64 -d
+
+Members sign in with `seshi login --server <url> --key <org key>`.
+{{- end }}
+
+If the store already had an admin, the Secret is not written and the ConfigMap
+{{ include "seshi.bootstrapStatusName" . }} says already-initialized (or the Secret holds only a new org key). Move the tokens somewhere safe and
+delete the Secret when you like; seshi does not read it.
+{{- else }}
+
+Make the store's first admin token{{ if $orgKey }} and org key{{ end }} once, in the server pod:
+
+  kubectl -n {{ .Release.Namespace }} exec deploy/{{ include "seshi.fullname" . }} -- seshi admin init --json --set {{ include "seshi.shellQuote" (printf "store.url=%s" .Values.store.url) }}
+
+A second `admin init` exits 6: the store already has an admin.
+{{- end }}
+{{- if not .Values.persistence.enabled }}
+
+The search index is on an emptyDir: after each restart, search answers 503 index_building
+until it is rebuilt from the bucket. persistence.enabled keeps it.
+{{- end }}
