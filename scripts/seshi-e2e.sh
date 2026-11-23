@@ -173,8 +173,15 @@ bun "$ROOT/scripts/seshi-smoke.ts" http://127.0.0.1:17201 "$WORK/init.json" sear
 if [ "$STORE" = az ]; then
   echo "--- runtime config in the bucket: the change outlived the pod"
   admin 17201 GET /v1/admin/config >"$WORK/config.json" || fail "GET /v1/admin/config failed"
-  grep -q '"runtime_config": *"store"' "$WORK/config.json" || fail "runtime_config is not store"
-  grep -q 'acme/runtime' "$WORK/config.json" || fail "the new pod lost the admin API's change"
+  # The list in effect on the new pod: the values' entry, then the bucket's.
+  # shellcheck disable=SC2016 # JavaScript, not shell
+  exclude="$(bun -e '
+    const status = await Bun.file(process.argv[1]).json();
+    if (status.runtime_config !== "store") throw new Error(`runtime_config ${status.runtime_config}`);
+    console.log((status.effective?.capture?.exclude ?? []).join(" "));
+  ' "$WORK/config.json")" || fail "GET /v1/admin/config did not say runtime_config store"
+  [ "$exclude" = "acme/secret acme/runtime" ] ||
+    fail "the new pod's capture.exclude is '$exclude', not the values' entry and the bucket's"
 fi
 
 echo "--- reinstall: the Secret is this store's, so it is kept"
@@ -200,6 +207,10 @@ echo "--- reinstall: a Secret of another store stops the bootstrap before it mak
 k -n "$NS" annotate secret "$secret" seshi.dosu.ai/store=0000000000000000 --overwrite >/dev/null
 reinstall 60s && fail "the bootstrap overwrote another store's Secret"
 job_log check | grep -q "another store" || fail "the bootstrap did not say why it stopped"
+for object in role rolebinding; do
+  k -n "$NS" get "$object" "$RELEASE-bootstrap" >/dev/null 2>&1 &&
+    fail "the bootstrap's $object outlived the failed Job"
+done
 k -n "$NS" annotate secret "$secret" "seshi.dosu.ai/store=$store" --overwrite >/dev/null
 
 echo "--- reinstall: tokens an earlier run made but never saved are reported, not ignored"

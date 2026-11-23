@@ -8,8 +8,8 @@ release the chart runs; the chart's own `version` moves on its own.
 ## Install
 
 seshi keeps sessions in a bucket ([server.md](https://github.com/dosu-ai/seshi/blob/main/docs/server.md#deploying)).
-Put the bucket's keys in a Secret (or use the pod's cloud identity, [below](#buckets-and-keys)),
-then install:
+Put the bucket's keys in a Secret (on Azure and Google Cloud, the pod's cloud identity also
+works, [below](#buckets-and-keys)), then install:
 
 ```sh
 kubectl create namespace seshi
@@ -111,14 +111,19 @@ failure, or the Job giving up after its retries) loses them with it; the next ru
   does nothing; run `seshi admin init` in the server pod instead.
 - **Not for a folder store.** The server pod holds the claim, so make the tokens there.
 
-The Job runs as the server's ServiceAccount, so workload identity gets `seshi admin init` into
-the bucket the same way it gets the server in, and its pod carries `podLabels`. When the server
-runs as the namespace's `default` ServiceAccount (`serviceAccount.create: false` and no
-`serviceAccount.name`), the Job gets one of its own instead. A Role bound to that account while
-the hook runs may create Secrets and ConfigMaps in the namespace, read its Secret, and read and
-replace its ConfigMap. Only the two curl steps mount the Kubernetes API token; the seshi steps
-never see it. Helm deletes the Job, the Role and its binding when the Job succeeds; after a
-failure they stay until the next install replaces them. Under an egress NetworkPolicy, the Job must reach the Kubernetes API
+The Job runs as the ServiceAccount the chart makes for the server (`serviceAccount.create`, the
+default), so workload identity gets `seshi admin init` into the bucket the same way it gets the
+server in, and its pod carries `podLabels`. With an account the chart does not make
+(`serviceAccount.create: false`), which other workloads may share, the Job gets an account of
+its own instead: workload identity then does not reach it, so give it keys in
+`store.credentials`, or set `bootstrap.enabled: false` and run `seshi admin init` in the server
+pod. A Role bound to the Job's account while the hook runs may create Secrets and ConfigMaps in
+the namespace, read its Secret, and read and replace its ConfigMap. Only the two curl steps
+mount the Kubernetes API token; the seshi steps never see it. Helm deletes the Role and its
+binding when the Job succeeds or fails, and the Job itself when it succeeds. One case escapes
+that: when the API refuses to create the Job at all (a ResourceQuota on Jobs, an admission
+policy), Helm stops with the Role and binding in place. Delete `<release>-bootstrap`'s Role and
+RoleBinding by hand then, or the next install replaces them. Under an egress NetworkPolicy, the Job must reach the Kubernetes API
 as well as the bucket. The Secret and the ConfigMap are not part of the release: they outlive
 `helm uninstall`, like the store's admin they belong to. seshi never reads the Secret: copy the
 tokens to a password manager and delete it when you like.
@@ -138,12 +143,12 @@ otherwise. Admins make more tokens with `seshi tokens` or `POST /v1/tokens`. Wit
 seshi finds its way into the bucket the way each cloud's own tools do
 ([config.md](https://github.com/dosu-ai/seshi/blob/main/docs/config.md#store)). With
 `store.credentials.existingSecret`, the chart hands seshi the Secret's keys for the URL's
-scheme. Without a Secret, seshi uses the pod's identity, which `serviceAccount.annotations` sets
-up:
+scheme. Without a Secret, an Azure or Google Cloud store uses the pod's identity, which
+`serviceAccount.annotations` sets up:
 
 | `store.url` | From `existingSecret` (`store.credentials.keys` names the keys) | Without a Secret |
 |---|---|---|
-| `s3://`, `r2://` | `access-key-id` and `secret-access-key` as `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`; `keys.sessionToken` adds `AWS_SESSION_TOKEN` | IRSA (`eks.amazonaws.com/role-arn`) or EKS Pod Identity |
+| `s3://`, `r2://` | `access-key-id` and `secret-access-key` as `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`; `keys.sessionToken` adds `AWS_SESSION_TOKEN` | None: seshi 0.27.0 reads only keys, not IRSA or EKS Pod Identity |
 | `az://` with `store.accountName` | `account-key` as `AZURE_STORAGE_KEY`, else `sas-token` as `AZURE_STORAGE_SAS_TOKEN`: whichever the Secret has | AKS workload identity: `azure.workload.identity/client-id` on the ServiceAccount, `azure.workload.identity/use: "true"` in `podLabels`, and **Storage Blob Data Contributor** on the container |
 | `gs://` | `service-account-key.json` mounted as the file `GOOGLE_APPLICATION_CREDENTIALS` names | GKE Workload Identity: `iam.gke.io/gcp-service-account` on the ServiceAccount, with **Storage Object User** on the bucket |
 

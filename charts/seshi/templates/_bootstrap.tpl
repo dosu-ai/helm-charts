@@ -18,55 +18,78 @@ the shell does not expand anything in them. */}}
 ends up using, in seshi's own order (packages/ts/store/src/open.ts, s3.ts, azure.ts, gcs.ts).
 s3:// and r2://: the config's endpoint; else S3_ENDPOINT when it is set at all, even empty; else
 R2's own endpoint for an r2:// URL with an account; else AWS_ENDPOINT. The account is the
-config's, else R2_ACCOUNT_ID when set. az://: the account is the config's, else
-AZURE_STORAGE_ACCOUNT, else the connection string's; the endpoint is the config's, else that of
-a connection string for this account. gs://: the config's endpoint, else STORAGE_EMULATOR_HOST. */}}
+config's, else R2_ACCOUNT_ID when set. az:// and gs:// record the endpoint seshi connects to,
+its default filled in and trailing slashes dropped, so two ways of naming one endpoint agree.
+az://: the account is the config's, else AZURE_STORAGE_ACCOUNT, else the connection string's;
+the endpoint is the config's, else that of a connection string for this account (BlobEndpoint,
+else EndpointSuffix), else https://<account>.blob.core.windows.net. gs://: the config's
+endpoint, else STORAGE_EMULATOR_HOST, else https://storage.googleapis.com. */}}
 {{- define "seshi.bootstrapStore" -}}
 set -u
 seshi config show --set "store.url=$STORE_URL" >/work/config.txt || exit 1
 has() { grep -q "^store\.$1 = " /work/config.txt; }
 setting() { sed -n "s/^store\.$1 = \"\(.*\)\"\$/\1/p" /work/config.txt; }
-# part <name>: AZURE_STORAGE_CONNECTION_STRING's part, the last one given, trimmed.
+# AZURE_STORAGE_CONNECTION_STRING as seshi reads it: `name=value` parts split on `;`, trimmed,
+# the last of a name winning; UseDevelopmentStorage=true supplies Azurite's account and endpoint
+# unless the string gives its own. A part given empty is still given.
+given() {
+  printf '%s' "${AZURE_STORAGE_CONNECTION_STRING:-}" | tr ';' '\n' |
+    grep -q "^[[:space:]]*$1[[:space:]]*="
+}
 part() {
   printf '%s' "${AZURE_STORAGE_CONNECTION_STRING:-}" | tr ';' '\n' |
     sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*//p" | tail -n 1 | sed 's/[[:space:]]*$//'
 }
-# conn <name>: the same, with UseDevelopmentStorage=true standing for Azurite's account.
+development() { [ "$(part UseDevelopmentStorage | tr '[:upper:]' '[:lower:]')" = true ]; }
+conn_has() {
+  given "$1" && return 0
+  development && case "$1" in AccountName | BlobEndpoint) return 0 ;; esac
+  return 1
+}
 conn() {
-  value="$(part "$1")"
-  if [ -z "$value" ] && [ "$(part UseDevelopmentStorage | tr '[:upper:]' '[:lower:]')" = true ]; then
+  if given "$1"; then part "$1"
+  elif development; then
     case "$1" in
-      AccountName) value=devstoreaccount1 ;;
-      BlobEndpoint) value=http://127.0.0.1:10000/devstoreaccount1 ;;
+      AccountName) printf devstoreaccount1 ;;
+      BlobEndpoint) printf http://127.0.0.1:10000/devstoreaccount1 ;;
     esac
   fi
-  printf '%s' "$value"
 }
 url="$(setting url)"
 case "$url" in
   az://*)
-    if has account_name; then account="$(setting account_name)"
+    # An empty setting is no setting: open.ts passes on only a non-empty one.
+    account="$(setting account_name)"
+    if [ -n "$account" ]; then :
     elif [ "${AZURE_STORAGE_ACCOUNT+set}" = set ]; then account="$AZURE_STORAGE_ACCOUNT"
     else account="$(conn AccountName)"; fi
+    # A connection string for another account lends this one nothing.
+    ours=yes
     named="$(conn AccountName)"
-    if has endpoint; then endpoint="$(setting endpoint)"
-    elif [ -n "$named" ] && [ "$named" != "$account" ]; then endpoint="(default)"
-    elif [ -n "$(conn BlobEndpoint)" ]; then endpoint="$(conn BlobEndpoint)"
-    elif [ -n "$(conn EndpointSuffix)" ]; then
-      endpoint="$(conn DefaultEndpointsProtocol)"
-      endpoint="${endpoint:-https}://$account.blob.$(conn EndpointSuffix)"
-    else endpoint="(default)"; fi
+    if [ -n "$account" ] && [ -n "$named" ] && [ "$named" != "$account" ]; then ours=no; fi
+    endpoint="$(setting endpoint)"
+    if [ -z "$endpoint" ] && [ "$ours" = yes ]; then
+      if conn_has BlobEndpoint; then endpoint="$(conn BlobEndpoint)"
+      elif [ -n "$(conn EndpointSuffix)" ]; then
+        if conn_has DefaultEndpointsProtocol; then protocol="$(conn DefaultEndpointsProtocol)"; else protocol=https; fi
+        endpoint="$protocol://$account.blob.$(conn EndpointSuffix)"
+      fi
+    fi
+    [ -n "$endpoint" ] || endpoint="https://$account.blob.core.windows.net"
+    endpoint="$(printf '%s' "$endpoint" | sed 's:/*$::')"
     account="config:$account"
     ;;
   gs://*)
     account=unset
-    if has endpoint; then endpoint="$(setting endpoint)"
-    elif [ -n "${STORAGE_EMULATOR_HOST:-}" ]; then
+    endpoint="$(setting endpoint)"
+    if [ -z "$endpoint" ] && [ -n "${STORAGE_EMULATOR_HOST:-}" ]; then
       case "$STORAGE_EMULATOR_HOST" in
         http://* | https://*) endpoint="$STORAGE_EMULATOR_HOST" ;;
         *) endpoint="http://$STORAGE_EMULATOR_HOST" ;;
       esac
-    else endpoint="(default)"; fi
+    fi
+    [ -n "$endpoint" ] || endpoint=https://storage.googleapis.com
+    endpoint="$(printf '%s' "$endpoint" | sed 's:/*$::')"
     ;;
   *)
     if has account_id; then account="config:$(setting account_id)"

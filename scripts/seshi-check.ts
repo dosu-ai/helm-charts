@@ -89,6 +89,18 @@ const REFUSED: { name: string; args: string[]; error: string }[] = [
     error: "store.credentials.existingSecret",
   },
   {
+    name: "a gs:// Secret with no key named for the service account key",
+    args: [
+      "--set",
+      "store.url=gs://b/p",
+      "--set",
+      "store.credentials.existingSecret=s",
+      "--set-string",
+      "store.credentials.keys.serviceAccountKey=",
+    ],
+    error: "serviceAccountKey is empty",
+  },
+  {
     name: "an ingress with no hosts",
     args: [...S3, "--set", "ingress.enabled=true"],
     error: "ingress.hosts",
@@ -379,7 +391,131 @@ function checkAwkwardInputs(): string[] {
       throw new Error(`the bootstrap's STORE_URL does not escape $: ${value}`);
     }
   }
+  // Secret keys that YAML would read as numbers: kubeconform checks these render as strings.
+  for (const [url, key] of [
+    ["az://c/p", "accountKey"],
+    ["gs://b/p", "serviceAccountKey"],
+  ]) {
+    const args = ["--set", `store.url=${url}`, "--set", "store.accountName=acct"];
+    args.push("--set-string", "store.credentials.existingSecret=1234");
+    args.push("--set-string", `store.credentials.keys.${key}=1234`);
+    rendered.push(must(["helm", "template", RELEASE, CHART, ...args], `numeric ${key}`));
+  }
   return rendered;
+}
+
+interface Setup {
+  set: string[];
+  env?: Record<string, string>;
+}
+
+const ACCT = ["store.url=az://c/p", "store.accountName=acct"];
+const GOV = "AccountName=acct;EndpointSuffix=core.usgovcloudapi.net";
+
+/** Pairs of setups that seshi resolves to the same store (same: true) or to different ones, so
+ * the bootstrap's fingerprint must agree or differ. */
+const FINGERPRINTS: { name: string; a: Setup; b: Setup; same: boolean }[] = [
+  {
+    name: "az:// account from config or AZURE_STORAGE_ACCOUNT",
+    a: { set: ACCT },
+    b: { set: ["store.url=az://c/p"], env: { AZURE_STORAGE_ACCOUNT: "acct" } },
+    same: true,
+  },
+  {
+    name: "az:// default endpoint, implicit or written out",
+    a: { set: ACCT },
+    b: { set: [...ACCT, "store.endpoint=https://acct.blob.core.windows.net/"] },
+    same: true,
+  },
+  {
+    name: "az:// a connection string for another account",
+    a: { set: ACCT },
+    b: {
+      set: ACCT,
+      env: { AZURE_STORAGE_CONNECTION_STRING: "AccountName=other;BlobEndpoint=http://other" },
+    },
+    same: true,
+  },
+  {
+    name: "az:// an empty BlobEndpoint overrides EndpointSuffix",
+    a: { set: ["store.url=az://c/p"], env: { AZURE_STORAGE_CONNECTION_STRING: GOV } },
+    b: {
+      set: ["store.url=az://c/p"],
+      env: { AZURE_STORAGE_CONNECTION_STRING: `${GOV};BlobEndpoint=` },
+    },
+    same: false,
+  },
+  {
+    name: "az:// another account",
+    a: { set: ACCT },
+    b: { set: ["store.url=az://c/p", "store.accountName=other"] },
+    same: false,
+  },
+  {
+    name: "gs:// emulator as host:port or as the endpoint",
+    a: { set: ["store.url=gs://b/p"], env: { STORAGE_EMULATOR_HOST: "fake-gcs:4443" } },
+    b: { set: ["store.url=gs://b/p", "store.endpoint=http://fake-gcs:4443/"] },
+    same: true,
+  },
+  {
+    name: "gs:// default endpoint, implicit or written out",
+    a: { set: ["store.url=gs://b/p"] },
+    b: { set: ["store.url=gs://b/p", "store.endpoint=https://storage.googleapis.com"] },
+    same: true,
+  },
+  {
+    name: "gs:// Cloud Storage or an emulator",
+    a: { set: ["store.url=gs://b/p"] },
+    b: { set: ["store.url=gs://b/p"], env: { STORAGE_EMULATOR_HOST: "fake-gcs:4443" } },
+    same: false,
+  },
+  {
+    name: "s3:// endpoint from config or S3_ENDPOINT",
+    a: { set: ["store.url=s3://b/p", "store.endpoint=http://rustfs:9000"] },
+    b: { set: ["store.url=s3://b/p"], env: { S3_ENDPOINT: "http://rustfs:9000" } },
+    same: true,
+  },
+];
+
+/** Runs the bootstrap's store step, as the chart renders it, in the chart's seshi image. */
+function fingerprint(setup: Setup, scratch: string): string {
+  const what = setup.set.join(" ");
+  const sets = setup.set.flatMap((v) => ["--set", v]);
+  const docs = manifests(must(["helm", "template", RELEASE, CHART, ...sets], `template ${what}`));
+  const config = docs.find((d) => d.kind === "ConfigMap")?.data?.["seshi.toml"];
+  const job = podSpec(docs.find((d) => d.kind === "Job") ?? {});
+  const store = job?.initContainers?.find((c) => c.name === "store");
+  if (config === undefined || store === undefined) throw new Error("no bootstrap store step");
+  const dir = mkdtempSync(join(scratch, "fingerprint-"));
+  chmodSync(dir, 0o755);
+  writeFileSync(join(dir, "seshi.toml"), config);
+  chmodSync(join(dir, "seshi.toml"), 0o644);
+  // The pod's own env, with Kubernetes' $$ escape undone, then the setup's.
+  const env: Record<string, string> = {};
+  for (const variable of store.env ?? []) {
+    if (variable.value !== undefined) env[variable.name] = variable.value.replaceAll("$$", "$");
+  }
+  Object.assign(env, setup.env);
+  const docker = ["docker", "run", "--rm", "--network", "none", "--read-only"];
+  docker.push("--tmpfs", "/tmp", "--tmpfs", "/work:mode=1777", "--user", "1000:999");
+  docker.push("-v", `${dir}:/etc/seshi:ro`);
+  for (const [name, value] of Object.entries(env)) docker.push("-e", `${name}=${value}`);
+  docker.push("--entrypoint", "/bin/sh", store.image, "-c", store.args?.[0] ?? "");
+  const out = must(docker, `the store step for ${what}`);
+  const id = /^store ([0-9a-f]{16}):/m.exec(out)?.[1];
+  if (id === undefined) throw new Error(`the store step for ${what} printed no fingerprint`);
+  return id;
+}
+
+function checkFingerprints(scratch: string): void {
+  for (const pair of FINGERPRINTS) {
+    const a = fingerprint(pair.a, scratch);
+    const b = fingerprint(pair.b, scratch);
+    if ((a === b) !== pair.same) {
+      const want = pair.same ? "match" : "differ";
+      throw new Error(`${pair.name}: fingerprints ${a} and ${b} should ${want}`);
+    }
+  }
 }
 
 function kubeconform(rendered: string[]): boolean {
@@ -409,6 +545,8 @@ if (import.meta.main) {
     checkRefused();
     console.log(`ok refused: ${REFUSED.length} value sets`);
     rendered.push(...checkAwkwardInputs());
+    checkFingerprints(scratch);
+    console.log(`ok store fingerprints: ${FINGERPRINTS.length} pairs`);
     console.log(`ok release names ${AWKWARD_RELEASES.join(", ")}; $ in store.url`);
     console.log(kubeconform(rendered) ? "ok kubeconform" : "skipped kubeconform: not on PATH");
   } catch (err) {

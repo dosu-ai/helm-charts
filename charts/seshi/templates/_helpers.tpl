@@ -117,6 +117,9 @@ app.kubernetes.io/component: server
 {{- if and $c.accessKeyId (not $c.existingSecret) (has $scheme (list "az" "gs")) }}
 {{- fail (printf "store.credentials.accessKeyId is for s3:// and r2://: give an %s:// bucket's key in store.credentials.existingSecret (store.credentials.keys says which key)" $scheme) }}
 {{- end }}
+{{- if and $c.existingSecret (eq $scheme "gs") (not $c.keys.serviceAccountKey) }}
+{{- fail "store.credentials.keys.serviceAccountKey is empty: name the key in store.credentials.existingSecret that holds the gs:// bucket's service account key" }}
+{{- end }}
 {{- if and $c.accessKeyId (not $c.existingSecret) $c.keys.sessionToken }}
 {{- fail "store.credentials.keys.sessionToken names a key in your own Secret: with temporary credentials, use store.credentials.existingSecret" }}
 {{- end }}
@@ -181,19 +184,19 @@ chart's packs set by the chart. */}}
 - name: AWS_ACCESS_KEY_ID
   valueFrom:
     secretKeyRef:
-      name: {{ $secret }}
-      key: {{ $keys.accessKeyId }}
+      name: {{ $secret | quote }}
+      key: {{ $keys.accessKeyId | quote }}
 - name: AWS_SECRET_ACCESS_KEY
   valueFrom:
     secretKeyRef:
-      name: {{ $secret }}
-      key: {{ $keys.secretAccessKey }}
+      name: {{ $secret | quote }}
+      key: {{ $keys.secretAccessKey | quote }}
 {{- if $keys.sessionToken }}
 - name: AWS_SESSION_TOKEN
   valueFrom:
     secretKeyRef:
-      name: {{ $secret }}
-      key: {{ $keys.sessionToken }}
+      name: {{ $secret | quote }}
+      key: {{ $keys.sessionToken | quote }}
 {{- end }}
 {{- else if and $secret (eq $scheme "az") }}
 {{- /* Optional: the Secret holds an account key or a SAS token, and seshi takes the key first. */}}
@@ -202,8 +205,8 @@ chart's packs set by the chart. */}}
 - name: {{ $env }}
   valueFrom:
     secretKeyRef:
-      name: {{ $secret }}
-      key: {{ $key }}
+      name: {{ $secret | quote }}
+      key: {{ $key | quote }}
       optional: true
 {{- end }}
 {{- end }}
@@ -241,10 +244,10 @@ seshi containers mount it. */}}
 {{- if and $secret (eq (include "seshi.storeScheme" .) "gs") }}
 - name: store-key
   secret:
-    secretName: {{ $secret }}
+    secretName: {{ $secret | quote }}
     defaultMode: 0440
     items:
-      - key: {{ .Values.store.credentials.keys.serviceAccountKey }}
+      - key: {{ .Values.store.credentials.keys.serviceAccountKey | quote }}
         path: key.json
 {{- end }}
 {{- end }}

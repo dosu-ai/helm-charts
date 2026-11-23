@@ -1,11 +1,13 @@
 {{- if and .Values.bootstrap.enabled (not (include "seshi.folderStore" .)) }}
 {{- $name := include "seshi.bootstrapStatusName" . }}
 {{- $secret := include "seshi.bootstrapSecretName" . }}
-{{- /* The Job runs as the server's service account, so workload identity (IRSA, GKE, AKS) lets
-`seshi admin init` reach the bucket as the server does. Without one (the namespace's default),
-it gets a service account of its own rather than granting the default one anything. */}}
+{{- /* The Job runs as the server's service account when the chart made it, so workload identity
+(GKE, AKS) lets `seshi admin init` reach the bucket as the server does; only the seshi pod
+uses that account, and it mounts no token. An account the chart did not make (serviceAccount.name,
+or the namespace's default) may be shared with other workloads, which the Job's Role must not
+reach, so the Job then gets an account of its own. */}}
 {{- $serviceAccount := include "seshi.serviceAccountName" . }}
-{{- $ownAccount := eq $serviceAccount "default" }}
+{{- $ownAccount := not .Values.serviceAccount.create }}
 {{- if $ownAccount }}
 {{- $serviceAccount = $name }}
 {{- end }}
@@ -26,11 +28,11 @@ metadata:
   annotations:
     helm.sh/hook: post-install
     helm.sh/hook-weight: "-10"
-    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded,hook-failed
 ---
 {{- end }}
 # The Role is bound to the Job's service account only while the hook runs: Helm deletes both
-# when the Job succeeds.
+# when the Job succeeds or fails. The Job itself stays after a failure, for its logs.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -41,7 +43,7 @@ metadata:
   annotations:
     helm.sh/hook: post-install
     helm.sh/hook-weight: "-10"
-    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded,hook-failed
 rules:
   # Create cannot be limited to a name; reading and replacing are.
   - apiGroups: [""]
@@ -69,7 +71,7 @@ metadata:
   annotations:
     helm.sh/hook: post-install
     helm.sh/hook-weight: "-10"
-    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded,hook-failed
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
