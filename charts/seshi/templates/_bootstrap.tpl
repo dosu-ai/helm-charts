@@ -15,27 +15,73 @@ the shell does not expand anything in them. */}}
 {{- end }}
 
 {{/* Step 0. The store's identity: the bucket URL, endpoint, account and deployment id seshi
-ends up using, in seshi's own order (packages/ts/store/src/open.ts and s3.ts): the config's
-endpoint; else S3_ENDPOINT when it is set at all, even empty; else R2's own endpoint for an
-r2:// URL with an account; else AWS_ENDPOINT. The account is the config's, else R2_ACCOUNT_ID
-when set. */}}
+ends up using, in seshi's own order (packages/ts/store/src/open.ts, s3.ts, azure.ts, gcs.ts).
+s3:// and r2://: the config's endpoint; else S3_ENDPOINT when it is set at all, even empty; else
+R2's own endpoint for an r2:// URL with an account; else AWS_ENDPOINT. The account is the
+config's, else R2_ACCOUNT_ID when set. az://: the account is the config's, else
+AZURE_STORAGE_ACCOUNT, else the connection string's; the endpoint is the config's, else that of
+a connection string for this account. gs://: the config's endpoint, else STORAGE_EMULATOR_HOST. */}}
 {{- define "seshi.bootstrapStore" -}}
 set -u
 seshi config show --set "store.url=$STORE_URL" >/work/config.txt || exit 1
 has() { grep -q "^store\.$1 = " /work/config.txt; }
 setting() { sed -n "s/^store\.$1 = \"\(.*\)\"\$/\1/p" /work/config.txt; }
+# part <name>: AZURE_STORAGE_CONNECTION_STRING's part, the last one given, trimmed.
+part() {
+  printf '%s' "${AZURE_STORAGE_CONNECTION_STRING:-}" | tr ';' '\n' |
+    sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*//p" | tail -n 1 | sed 's/[[:space:]]*$//'
+}
+# conn <name>: the same, with UseDevelopmentStorage=true standing for Azurite's account.
+conn() {
+  value="$(part "$1")"
+  if [ -z "$value" ] && [ "$(part UseDevelopmentStorage | tr '[:upper:]' '[:lower:]')" = true ]; then
+    case "$1" in
+      AccountName) value=devstoreaccount1 ;;
+      BlobEndpoint) value=http://127.0.0.1:10000/devstoreaccount1 ;;
+    esac
+  fi
+  printf '%s' "$value"
+}
 url="$(setting url)"
-if has account_id; then account="config:$(setting account_id)"
-elif [ "${R2_ACCOUNT_ID+set}" = set ]; then account="config:$R2_ACCOUNT_ID"
-else account=unset; fi
-if has endpoint; then endpoint="$(setting endpoint)"
-elif [ "${S3_ENDPOINT+set}" = set ]; then endpoint="$S3_ENDPOINT"
-else
-  case "$url:$account" in
-    r2://*:config:?*) endpoint="https://${account#config:}.r2.cloudflarestorage.com" ;;
-    *) if [ "${AWS_ENDPOINT+set}" = set ]; then endpoint="$AWS_ENDPOINT"; else endpoint="(default)"; fi ;;
-  esac
-fi
+case "$url" in
+  az://*)
+    if has account_name; then account="$(setting account_name)"
+    elif [ "${AZURE_STORAGE_ACCOUNT+set}" = set ]; then account="$AZURE_STORAGE_ACCOUNT"
+    else account="$(conn AccountName)"; fi
+    named="$(conn AccountName)"
+    if has endpoint; then endpoint="$(setting endpoint)"
+    elif [ -n "$named" ] && [ "$named" != "$account" ]; then endpoint="(default)"
+    elif [ -n "$(conn BlobEndpoint)" ]; then endpoint="$(conn BlobEndpoint)"
+    elif [ -n "$(conn EndpointSuffix)" ]; then
+      endpoint="$(conn DefaultEndpointsProtocol)"
+      endpoint="${endpoint:-https}://$account.blob.$(conn EndpointSuffix)"
+    else endpoint="(default)"; fi
+    account="config:$account"
+    ;;
+  gs://*)
+    account=unset
+    if has endpoint; then endpoint="$(setting endpoint)"
+    elif [ -n "${STORAGE_EMULATOR_HOST:-}" ]; then
+      case "$STORAGE_EMULATOR_HOST" in
+        http://* | https://*) endpoint="$STORAGE_EMULATOR_HOST" ;;
+        *) endpoint="http://$STORAGE_EMULATOR_HOST" ;;
+      esac
+    else endpoint="(default)"; fi
+    ;;
+  *)
+    if has account_id; then account="config:$(setting account_id)"
+    elif [ "${R2_ACCOUNT_ID+set}" = set ]; then account="config:$R2_ACCOUNT_ID"
+    else account=unset; fi
+    if has endpoint; then endpoint="$(setting endpoint)"
+    elif [ "${S3_ENDPOINT+set}" = set ]; then endpoint="$S3_ENDPOINT"
+    else
+      case "$url:$account" in
+        r2://*:config:?*) endpoint="https://${account#config:}.r2.cloudflarestorage.com" ;;
+        *) if [ "${AWS_ENDPOINT+set}" = set ]; then endpoint="$AWS_ENDPOINT"; else endpoint="(default)"; fi ;;
+      esac
+    fi
+    ;;
+esac
 printf 'url=%s\nendpoint=%s\naccount=%s\ndeployment=%s\n' \
   "$url" "$endpoint" "$account" "$(setting deployment_id)" >/work/store.txt
 sha256sum /work/store.txt | cut -c1-16 >/work/store-id

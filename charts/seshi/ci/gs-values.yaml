@@ -1,0 +1,7 @@
+# Google Cloud Storage through GKE Workload Identity: no keys, the service account is bound to a
+# Google service account. The bootstrap Job runs as it too.
+store:
+  url: gs://acme-seshi/prod
+serviceAccount:
+  annotations:
+    iam.gke.io/gcp-service-account: seshi@acme.iam.gserviceaccount.com

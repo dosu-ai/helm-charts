@@ -75,13 +75,24 @@ app.kubernetes.io/component: server
 {{- end }}
 {{- end }}
 
+{{/* The store URL's scheme: s3, r2, az, gs, or file for a folder store. */}}
+{{- define "seshi.storeScheme" -}}
+{{- $url := .Values.store.url }}
+{{- if hasPrefix "/" $url }}file
+{{- else }}{{ regexReplaceAll "^([a-z0-9]+)://.*$" $url "${1}" }}
+{{- end }}
+{{- end }}
+
+{{/* Where a gs:// bucket's service account key is mounted. */}}
+{{- define "seshi.gcsKeyDir" -}}/var/run/secrets/seshi/gcs{{- end }}
+
 {{- define "seshi.dataClaimName" -}}
 {{- default (include "seshi.suffixed" (dict "root" . "suffix" "data")) .Values.persistence.existingClaim }}
 {{- end }}
 
 {{/* Refuse values that would render something seshi refuses, or that loses data. */}}
 {{- define "seshi.validate" -}}
-{{- $url := required "store.url is required: s3://bucket/prefix, r2://bucket/prefix or file:///data/store (the chart's README)" .Values.store.url }}
+{{- $url := required "store.url is required: s3://bucket/prefix, r2://bucket/prefix, az://container/prefix, gs://bucket/prefix or file:///data/store (the chart's README)" .Values.store.url }}
 {{- $config := .Values.config | default dict }}
 {{- if hasKey $config "store" }}
 {{- fail "config.store: set the store with the chart's store.* values" }}
@@ -102,6 +113,10 @@ app.kubernetes.io/component: server
 {{- end }}
 {{- end }}
 {{- $c := .Values.store.credentials }}
+{{- $scheme := include "seshi.storeScheme" . }}
+{{- if and $c.accessKeyId (not $c.existingSecret) (has $scheme (list "az" "gs")) }}
+{{- fail (printf "store.credentials.accessKeyId is for s3:// and r2://: give an %s:// bucket's key in store.credentials.existingSecret (store.credentials.keys says which key)" $scheme) }}
+{{- end }}
 {{- if and $c.accessKeyId (not $c.existingSecret) $c.keys.sessionToken }}
 {{- fail "store.credentials.keys.sessionToken names a key in your own Secret: with temporary credentials, use store.credentials.existingSecret" }}
 {{- end }}
@@ -128,7 +143,7 @@ chart's packs set by the chart. */}}
 {{- $config := deepCopy (.Values.config | default dict) }}
 {{- $s := .Values.store }}
 {{- $store := dict "url" $s.url }}
-{{- range $key, $value := dict "region" $s.region "endpoint" $s.endpoint "account_id" $s.accountId "deployment_id" $s.deploymentId "org" $s.org }}
+{{- range $key, $value := dict "region" $s.region "endpoint" $s.endpoint "account_id" $s.accountId "account_name" $s.accountName "deployment_id" $s.deploymentId "org" $s.org }}
 {{- if $value }}
 {{- $_ := set $store $key $value }}
 {{- end }}
@@ -161,7 +176,8 @@ chart's packs set by the chart. */}}
 # Also what `kubectl exec … seshi admin init` and `seshi workers status` read.
 - name: SESHI_CONFIG
   value: /etc/seshi/seshi.toml
-{{- if $secret }}
+{{- $scheme := include "seshi.storeScheme" . }}
+{{- if and $secret (has $scheme (list "s3" "r2")) }}
 - name: AWS_ACCESS_KEY_ID
   valueFrom:
     secretKeyRef:
@@ -179,6 +195,21 @@ chart's packs set by the chart. */}}
       name: {{ $secret }}
       key: {{ $keys.sessionToken }}
 {{- end }}
+{{- else if and $secret (eq $scheme "az") }}
+{{- /* Optional: the Secret holds an account key or a SAS token, and seshi takes the key first. */}}
+{{- range $env, $key := dict "AZURE_STORAGE_KEY" $keys.accountKey "AZURE_STORAGE_SAS_TOKEN" $keys.sasToken }}
+{{- if $key }}
+- name: {{ $env }}
+  valueFrom:
+    secretKeyRef:
+      name: {{ $secret }}
+      key: {{ $key }}
+      optional: true
+{{- end }}
+{{- end }}
+{{- else if and $secret (eq $scheme "gs") }}
+- name: GOOGLE_APPLICATION_CREDENTIALS
+  value: {{ include "seshi.gcsKeyDir" . }}/key.json
 {{- end }}
 {{- with .Values.extraEnv }}
 {{ toYaml . }}
@@ -201,6 +232,29 @@ chart's packs set by the chart. */}}
       - key: pack.{{ $file }}
         path: packs/{{ $file }}
       {{- end }}
+{{- end }}
+
+{{/* The volume holding a gs:// bucket's service account key, when there is one; and where the
+seshi containers mount it. */}}
+{{- define "seshi.storeVolumes" -}}
+{{- $secret := include "seshi.storeSecretName" . }}
+{{- if and $secret (eq (include "seshi.storeScheme" .) "gs") }}
+- name: store-key
+  secret:
+    secretName: {{ $secret }}
+    defaultMode: 0440
+    items:
+      - key: {{ .Values.store.credentials.keys.serviceAccountKey }}
+        path: key.json
+{{- end }}
+{{- end }}
+
+{{- define "seshi.storeVolumeMounts" -}}
+{{- if include "seshi.storeVolumes" . }}
+- name: store-key
+  mountPath: {{ include "seshi.gcsKeyDir" . }}
+  readOnly: true
+{{- end }}
 {{- end }}
 
 {{- define "seshi.bootstrapSecretName" -}}

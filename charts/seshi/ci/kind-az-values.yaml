@@ -1,0 +1,23 @@
+# The install test on kind with STORE=az: an Azurite container in the namespace, its published
+# development account key in the Secret seshi-store, and the runtime config in the bucket.
+store:
+  url: az://seshi-e2e/sessions
+  accountName: devstoreaccount1
+  endpoint: http://azurite:10000/devstoreaccount1
+  credentials:
+    existingSecret: seshi-store
+config:
+  server:
+    runtime_config: store
+    config_poll: 1s
+  worker:
+    heartbeat_interval: 1s
+  search:
+    interval: 1s
+dropIns:
+  10-capture:
+    capture:
+      exclude: [acme/secret]
+persistence:
+  enabled: true
+  size: 1Gi

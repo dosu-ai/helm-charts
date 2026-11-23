@@ -5,8 +5,8 @@ metadata:
   labels:
     {{- include "seshi.labels" . | nindent 4 }}
 spec:
-  # One instance runs both roles (api and worker). Exactly one instance may run the worker, and
-  # POST /v1/admin/reload reloads only the instance that answers it, so this is not a value.
+  # One instance runs both roles (api and worker). Exactly one instance may run the worker, so
+  # this is not a value.
   replicas: 1
   # An upgrade stops the old pod before starting the new one. A pod deleted by hand can still
   # overlap its replacement while it shuts down (within five seconds); seshi's checkpoints and
@@ -93,6 +93,7 @@ spec:
               mountPath: /data
             - name: tmp
               mountPath: /tmp
+            {{- with include "seshi.storeVolumeMounts" . | trim }}{{ . | nindent 12 }}{{ end }}
             {{- with .Values.extraVolumeMounts }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -110,6 +111,7 @@ spec:
           {{- end }}
         - name: tmp
           emptyDir: {}
+        {{- with include "seshi.storeVolumes" . | trim }}{{ . | nindent 8 }}{{ end }}
         {{- with .Values.extraVolumes }}
         {{- toYaml . | nindent 8 }}
         {{- end }}

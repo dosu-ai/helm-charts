@@ -1,13 +1,15 @@
 # seshi
 
 Runs the [seshi](https://github.com/dosu-ai/seshi) server, `seshi serve`, on Kubernetes: one pod
-with both roles (api and worker) against an S3-compatible bucket. `appVersion` is the seshi
+with both roles (api and worker) against a bucket in S3 (or an S3-compatible service), R2, Azure
+Blob Storage or Google Cloud Storage. `appVersion` is the seshi
 release the chart runs; the chart's own `version` moves on its own.
 
 ## Install
 
 seshi keeps sessions in a bucket ([server.md](https://github.com/dosu-ai/seshi/blob/main/docs/server.md#deploying)).
-Put the bucket's keys in a Secret, then install:
+Put the bucket's keys in a Secret (or use the pod's cloud identity, [below](#buckets-and-keys)),
+then install:
 
 ```sh
 kubectl create namespace seshi
@@ -36,9 +38,10 @@ keys. The ones most installs set:
 
 | Value | What it sets |
 |---|---|
-| `store.url` | `[store] url`. Required. `s3://bucket/prefix`, `r2://bucket/prefix`, or `file:///data/store` with `persistence.enabled` |
-| `store.region`, `store.endpoint`, `store.accountId`, `store.deploymentId`, `store.org` | The rest of `[store]` ([config.md](https://github.com/dosu-ai/seshi/blob/main/docs/config.md)) |
-| `store.credentials.existingSecret` | A Secret with the bucket's keys, given to seshi as `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` (and `AWS_SESSION_TOKEN` with `keys.sessionToken`). `store.credentials.keys` names its keys |
+| `store.url` | `[store] url`. Required. `s3://bucket/prefix`, `r2://bucket/prefix`, `az://container/prefix`, `gs://bucket/prefix`, or `file:///data/store` with `persistence.enabled` |
+| `store.region`, `store.endpoint`, `store.accountId`, `store.accountName`, `store.deploymentId`, `store.org` | The rest of `[store]` ([config.md](https://github.com/dosu-ai/seshi/blob/main/docs/config.md)) |
+| `store.credentials.existingSecret` | A Secret with the bucket's keys ([below](#buckets-and-keys)). `store.credentials.keys` names its keys |
+| `serviceAccount.annotations`, `podLabels` | Workload identity, in place of keys ([below](#buckets-and-keys)) |
 | `config` | The rest of `seshi.toml`, written as YAML: `auth`, `filter`, `limits`, `redaction`, `review`, `sources`, `search`, `worker`, `capture` and the others in [config.md](https://github.com/dosu-ai/seshi/blob/main/docs/config.md) |
 | `dropIns` | Files for `seshi.d/`, by name ([below](#drop-ins-and-rule-packs)) |
 | `redactionPacks` | Rule packs, by file name ([redaction.md](https://github.com/dosu-ai/seshi/blob/main/docs/redaction.md)) |
@@ -108,9 +111,14 @@ failure, or the Job giving up after its retries) loses them with it; the next ru
   does nothing; run `seshi admin init` in the server pod instead.
 - **Not for a folder store.** The server pod holds the claim, so make the tokens there.
 
-The Job runs with its own ServiceAccount and a Role that may create Secrets and ConfigMaps in
-the namespace, read its Secret, and read and replace its ConfigMap. Helm deletes the Job and
-its Role when it succeeds. Under an egress NetworkPolicy, the Job must reach the Kubernetes API
+The Job runs as the server's ServiceAccount, so workload identity gets `seshi admin init` into
+the bucket the same way it gets the server in, and its pod carries `podLabels`. When the server
+runs as the namespace's `default` ServiceAccount (`serviceAccount.create: false` and no
+`serviceAccount.name`), the Job gets one of its own instead. A Role bound to that account while
+the hook runs may create Secrets and ConfigMaps in the namespace, read its Secret, and read and
+replace its ConfigMap. Only the two curl steps mount the Kubernetes API token; the seshi steps
+never see it. Helm deletes the Job, the Role and its binding when the Job succeeds; after a
+failure they stay until the next install replaces them. Under an egress NetworkPolicy, the Job must reach the Kubernetes API
 as well as the bucket. The Secret and the ConfigMap are not part of the release: they outlive
 `helm uninstall`, like the store's admin they belong to. seshi never reads the Secret: copy the
 tokens to a password manager and delete it when you like.
@@ -124,6 +132,40 @@ kubectl -n seshi exec deploy/seshi -- seshi admin init --json --set 'store.url=s
 `--set store.url` keeps the command on the chart's store even when the pod's environment says
 otherwise. Admins make more tokens with `seshi tokens` or `POST /v1/tokens`. With an IdP, add
 `config.auth.oidc` and members sign in through it; the admin token still works.
+
+## Buckets and keys
+
+seshi finds its way into the bucket the way each cloud's own tools do
+([config.md](https://github.com/dosu-ai/seshi/blob/main/docs/config.md#store)). With
+`store.credentials.existingSecret`, the chart hands seshi the Secret's keys for the URL's
+scheme. Without a Secret, seshi uses the pod's identity, which `serviceAccount.annotations` sets
+up:
+
+| `store.url` | From `existingSecret` (`store.credentials.keys` names the keys) | Without a Secret |
+|---|---|---|
+| `s3://`, `r2://` | `access-key-id` and `secret-access-key` as `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`; `keys.sessionToken` adds `AWS_SESSION_TOKEN` | IRSA (`eks.amazonaws.com/role-arn`) or EKS Pod Identity |
+| `az://` with `store.accountName` | `account-key` as `AZURE_STORAGE_KEY`, else `sas-token` as `AZURE_STORAGE_SAS_TOKEN`: whichever the Secret has | AKS workload identity: `azure.workload.identity/client-id` on the ServiceAccount, `azure.workload.identity/use: "true"` in `podLabels`, and **Storage Blob Data Contributor** on the container |
+| `gs://` | `service-account-key.json` mounted as the file `GOOGLE_APPLICATION_CREDENTIALS` names | GKE Workload Identity: `iam.gke.io/gcp-service-account` on the ServiceAccount, with **Storage Object User** on the bucket |
+
+The container (Azure) or bucket must exist; seshi does not create it. `store.credentials.accessKeyId`
+and `secretAccessKey` make the Secret for you, for `s3://` and `r2://` only.
+
+```yaml
+# Azure, with a SAS token in the Secret seshi-azure
+store:
+  url: az://sessions/seshi
+  accountName: acmeseshi
+  credentials:
+    existingSecret: seshi-azure
+    keys: { accountKey: "", sasToken: sas-token }
+---
+# Google Cloud, through GKE Workload Identity
+store:
+  url: gs://acme-seshi/prod
+serviceAccount:
+  annotations:
+    iam.gke.io/gcp-service-account: seshi@acme.iam.gserviceaccount.com
+```
 
 ## Storage
 
@@ -166,11 +208,35 @@ redactionPacks:
 Each pack is mounted at `/etc/seshi/packs/<file>` and added to `redaction.packs`. Both come from
 the ConfigMap, so a change is a `helm upgrade` and a restart.
 
+### Runtime config in the bucket
+
+With `config.server.runtime_config: store`, the data policy (`capture`, `redaction`, `filter`,
+`review`, `records`, `default_visibility`) and sources can also live in the bucket, where the
+admin API changes them without a `helm upgrade` (`PATCH /v1/admin/config`,
+`PUT /v1/admin/sources/<id>`, `seshi admin config push`;
+[config.md](https://github.com/dosu-ai/seshi/blob/main/docs/config.md#runtime-config-in-the-bucket-serverruntime_config--store)).
+Those changes outlive the pod. What the chart's values set still wins and is locked against
+the API, and a list such as `capture.exclude` adds the bucket's entries after the values'. A
+source stored with secrets needs a sealing key in `config.secrets`, given as an `env` reference:
+
+```yaml
+config:
+  server:
+    runtime_config: store
+  secrets:
+    key_id: k1
+    keys: { k1: { env: SEAL_KEY_1 } }
+extraEnv:
+  - name: SEAL_KEY_1   # openssl rand -hex 32, kept in a Secret
+    valueFrom: { secretKeyRef: { name: seshi-sealing, key: k1 } }
+```
+
+The server does not start when it cannot read the bucket's runtime config.
+
 ## One pod
 
-The chart runs one replica with both roles. Exactly one instance may run the worker,
-`POST /v1/admin/reload` reloads only the instance that answers it, and each API instance builds
-its own search index, so there is no `replicas` value. Upgrades use the `Recreate` strategy:
+The chart runs one replica with both roles. Exactly one instance may run the worker and each
+API instance builds its own search index, so there is no `replicas` value. Upgrades use the `Recreate` strategy:
 the old pod stops before the new one starts, and uploaders retry through the gap. A pod deleted
 by hand can overlap its replacement for the few seconds it takes to stop; seshi's checkpoints
 and deduplication tolerate a second worker for that long.

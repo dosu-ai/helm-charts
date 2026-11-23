@@ -79,6 +79,16 @@ const REFUSED: { name: string; args: string[]; error: string }[] = [
     error: "existingSecret",
   },
   {
+    name: "inline keys for an az:// store",
+    args: ["--set", "store.url=az://c/p", "--set", "store.credentials.accessKeyId=a"],
+    error: "store.credentials.existingSecret",
+  },
+  {
+    name: "inline keys for a gs:// store",
+    args: ["--set", "store.url=gs://b/p", "--set", "store.credentials.accessKeyId=a"],
+    error: "store.credentials.existingSecret",
+  },
+  {
     name: "an ingress with no hosts",
     args: [...S3, "--set", "ingress.enabled=true"],
     error: "ingress.hosts",
@@ -123,6 +133,7 @@ interface Volume {
 }
 interface PodSpec {
   enableServiceLinks?: boolean;
+  automountServiceAccountToken?: boolean;
   containers: Container[];
   initContainers?: Container[];
   volumes?: Volume[];
@@ -218,6 +229,9 @@ function seshiRun(image: string, root: string, env: string[], command: string[])
       "--network",
       "none",
       "--read-only",
+      // The pod's /tmp is an emptyDir; seshi caches the bucket's runtime config there.
+      "--tmpfs",
+      "/tmp",
       "--user",
       "1000:999",
       ...env,
@@ -247,6 +261,7 @@ function checkValues(file: string, scratch: string): string {
     if (spec !== undefined && spec.enableServiceLinks !== false) {
       throw new Error(`${doc.kind} ${doc.metadata?.name} leaves service links on`);
     }
+    if (spec !== undefined) checkMounts(doc, spec);
   }
 
   const deployment = docs.find((d) => d.kind === "Deployment");
@@ -293,6 +308,31 @@ function checkValues(file: string, scratch: string): string {
     if (!origins.has(dropIn)) throw new Error(`seshi never read the drop-in ${dropIn}`);
   }
   return rendered;
+}
+
+const KUBE_API = "/var/run/secrets/kubernetes.io/serviceaccount";
+
+/** A key file named in a container's env must be mounted in that container, and in the bootstrap
+ * Job the Kubernetes API token reaches the curl steps only, never seshi. */
+function checkMounts(doc: Manifest, spec: PodSpec): void {
+  const what = `${doc.kind} ${doc.metadata?.name}`;
+  const containers = [...(spec.initContainers ?? []), ...spec.containers];
+  for (const container of containers) {
+    const mounts = container.volumeMounts ?? [];
+    const keyFile = container.env?.find((e) => e.name === "GOOGLE_APPLICATION_CREDENTIALS")?.value;
+    if (keyFile !== undefined && !mounts.some((m) => keyFile.startsWith(`${m.mountPath}/`))) {
+      throw new Error(`${what}: ${container.name} names ${keyFile} but mounts nothing there`);
+    }
+    const token = mounts.some((m) => m.mountPath === KUBE_API);
+    if (doc.kind === "Job" && token === container.image.includes("/seshi")) {
+      throw new Error(
+        `${what}: ${container.name} ${token ? "gets" : "lacks"} the Kubernetes API token`,
+      );
+    }
+  }
+  if (doc.kind === "Job" && spec.automountServiceAccountToken !== false) {
+    throw new Error(`${what} mounts the Kubernetes API token in every container`);
+  }
 }
 
 function checkRefused(): void {

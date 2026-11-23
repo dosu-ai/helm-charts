@@ -15,27 +15,44 @@ imagePullSecrets: []
 
 # Where sessions go: [store] in seshi.toml.
 store:
-  # Required. s3://bucket/prefix, r2://bucket/prefix, or file:///data/store (only with
+  # Required. s3://bucket/prefix, r2://bucket/prefix, az://container/prefix (Azure Blob
+  # Storage), gs://bucket/prefix (Google Cloud Storage), or file:///data/store (only with
   # persistence.enabled: a file store on an emptyDir is lost with the pod).
   url: ""
+  # The AWS region, for s3://.
   region: ""
-  # An S3-compatible endpoint (RustFS, MinIO, Backblaze, …).
+  # An S3-compatible endpoint (RustFS, MinIO, Backblaze, …). For az://, the blob endpoint when
+  # it is not https://<account>.blob.core.windows.net; for gs://, the JSON API root when it is
+  # not https://storage.googleapis.com.
   endpoint: ""
   # The Cloudflare account, for r2://.
   accountId: ""
+  # The Azure storage account, for az://.
+  accountName: ""
   # This deployment's id, recorded in the bucket; seshi refuses a bucket marked for another.
   deploymentId: ""
   org: ""
-  # The bucket's keys, given to seshi as AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY.
+  # The bucket's keys. With neither existingSecret nor accessKeyId, seshi uses the pod's own
+  # identity: an IAM role (IRSA, EKS Pod Identity), GKE Workload Identity or AKS workload
+  # identity, set up with serviceAccount.annotations (README.md, "Storage").
   credentials:
     # A Secret you made. When empty and accessKeyId is set, the chart makes one.
     existingSecret: ""
+    # The keys in it. seshi is given the ones for its URL's scheme.
     keys:
+      # s3:// and r2://: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY and, when named,
+      # AWS_SESSION_TOKEN (for temporary credentials).
       accessKeyId: access-key-id
       secretAccessKey: secret-access-key
-      # The key holding a session token, for temporary credentials. Empty: none.
       sessionToken: ""
-    # Inline keys, for trials. Prefer existingSecret.
+      # az://: AZURE_STORAGE_KEY and AZURE_STORAGE_SAS_TOKEN, from whichever of the two keys the
+      # Secret has (the account key wins).
+      accountKey: account-key
+      sasToken: sas-token
+      # gs://: a service account's JSON key, mounted as the file GOOGLE_APPLICATION_CREDENTIALS
+      # names.
+      serviceAccountKey: service-account-key.json
+    # Inline keys for s3:// and r2://, for trials. Prefer existingSecret.
     accessKeyId: ""
     secretAccessKey: ""
 
@@ -80,7 +97,7 @@ persistence:
   storageClass: ""
   size: 10Gi
 
-# More environment for the seshi container. A SESHI_* name must be a real setting: seshi
+# More environment for the seshi container (and the bootstrap Job's seshi steps). A SESHI_* name must be a real setting: seshi
 # refuses to start on one it does not know.
 extraEnv: []
 envFrom: []
@@ -108,6 +125,9 @@ serviceAccount:
   create: true
   # Defaults to the release's full name.
   name: ""
+  # Workload identity goes here: eks.amazonaws.com/role-arn (IRSA),
+  # iam.gke.io/gcp-service-account (GKE), azure.workload.identity/client-id (AKS). The bootstrap
+  # Job runs as this service account too, so `seshi admin init` reaches the bucket the same way.
   annotations: {}
 
 networkPolicy:
@@ -146,6 +166,8 @@ probes:
   readiness: {}
 
 podAnnotations: {}
+# Also on the bootstrap Job's pod, so a label workload identity needs (AKS:
+# azure.workload.identity/use: "true") reaches `seshi admin init` too.
 podLabels: {}
 nodeSelector: {}
 tolerations: []

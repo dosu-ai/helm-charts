@@ -73,9 +73,14 @@ jobs:
           sudo tar -xzf /tmp/kubeconform.tar.gz -C /usr/local/bin kubeconform
       - run: bun scripts/seshi-check.ts
 
-  # Install the seshi chart on kind against RustFS: bootstrap, upload, search, restart.
+  # Install the seshi chart on kind against a bucket in the cluster: bootstrap, upload, search,
+  # restart. s3 is RustFS, az Azurite, gs fake-gcs-server (scripts/seshi-e2e.sh).
   seshi-kind:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        store: [s3, az, gs]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -91,3 +96,5 @@ jobs:
           version: v0.33.0
           cluster_name: seshi-chart
       - run: scripts/seshi-e2e.sh
+        env:
+          STORE: ${{ matrix.store }}

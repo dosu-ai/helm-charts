@@ -45,13 +45,14 @@
       "additionalProperties": false,
       "properties": {
         "url": {
-          "description": "s3://bucket/prefix, r2://bucket/prefix, or file:///path (with persistence.enabled).",
+          "description": "s3://bucket/prefix, r2://bucket/prefix, az://container/prefix, gs://bucket/prefix, or file:///path (with persistence.enabled).",
           "type": "string",
-          "pattern": "^$|^(?:file:\\/\\/\\/?.*|\\/.*|(?:s3|r2):\\/\\/[^/\\s]+(?:\\/.*)?)$"
+          "pattern": "^$|^(?:file:\\/\\/\\/?.*|\\/.*|(?:s3|r2|az|gs):\\/\\/[^/\\s]+(?:\\/.*)?)$"
         },
         "region": { "type": "string" },
         "endpoint": { "type": "string" },
         "accountId": { "type": "string" },
+        "accountName": { "type": "string" },
         "deploymentId": { "type": "string" },
         "org": { "type": "string" },
         "credentials": {
@@ -65,7 +66,10 @@
               "properties": {
                 "accessKeyId": { "type": "string", "minLength": 1 },
                 "secretAccessKey": { "type": "string", "minLength": 1 },
-                "sessionToken": { "type": "string" }
+                "sessionToken": { "type": "string" },
+                "accountKey": { "type": "string" },
+                "sasToken": { "type": "string" },
+                "serviceAccountKey": { "type": "string" }
               }
             },
             "accessKeyId": { "type": "string" },

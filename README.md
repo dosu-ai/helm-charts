@@ -22,6 +22,8 @@ The seshi chart's checks run locally with `helm`, `docker` and `bun`:
 bun scripts/seshi-check.ts        # lint, render, seshi config check, refused values, kubeconform
 kind create cluster --name seshi-chart
 scripts/seshi-e2e.sh              # install against RustFS, bootstrap, upload, search, restart
+STORE=az scripts/seshi-e2e.sh     # the same against Azurite, with the runtime config in the bucket
+STORE=gs scripts/seshi-e2e.sh     # the same against fake-gcs-server
 ```
 
 `seshi-check.ts` runs the chart's own seshi release (`ghcr.io/dosu-ai/seshi:<appVersion>`) on

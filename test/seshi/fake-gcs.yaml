@@ -1,0 +1,35 @@
+# A Cloud Storage emulator for the seshi chart's install test (STORE=gs scripts/seshi-e2e.sh).
+# Not for use beyond a throwaway cluster: no auth, no volume.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fake-gcs
+spec:
+  selector:
+    matchLabels: { app: fake-gcs }
+  template:
+    metadata:
+      labels: { app: fake-gcs }
+    spec:
+      # The Service fake-gcs would give the pod FAKE_GCS_PORT=tcp://…, which fake-gcs-server
+      # reads as its own port setting and exits.
+      enableServiceLinks: false
+      containers:
+        - name: fake-gcs
+          image: fsouza/fake-gcs-server:1.56.1@sha256:797ce226d62f947c009dc40246b30cfb456b8473d8241407f9d6f2c04e4d69ef
+          args: [-scheme, http, -port, "4443", -public-host, "fake-gcs:4443", -backend, memory]
+          ports:
+            - containerPort: 4443
+          readinessProbe:
+            httpGet: { path: /storage/v1/b, port: 4443 }
+            periodSeconds: 2
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: fake-gcs
+spec:
+  selector: { app: fake-gcs }
+  ports:
+    - port: 4443
+      targetPort: 4443

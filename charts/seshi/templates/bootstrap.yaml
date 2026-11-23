@@ -1,12 +1,21 @@
 {{- if and .Values.bootstrap.enabled (not (include "seshi.folderStore" .)) }}
 {{- $name := include "seshi.bootstrapStatusName" . }}
 {{- $secret := include "seshi.bootstrapSecretName" . }}
+{{- /* The Job runs as the server's service account, so workload identity (IRSA, GKE, AKS) lets
+`seshi admin init` reach the bucket as the server does. Without one (the namespace's default),
+it gets a service account of its own rather than granting the default one anything. */}}
+{{- $serviceAccount := include "seshi.serviceAccountName" . }}
+{{- $ownAccount := eq $serviceAccount "default" }}
+{{- if $ownAccount }}
+{{- $serviceAccount = $name }}
+{{- end }}
 {{- /* Kubernetes expands $(NAME) in env values; $$ keeps a $ in the URL literal. */}}
 {{- $scriptEnv := list (dict "name" "STORE_URL" "value" (replace "$" "$$" .Values.store.url)) (dict "name" "BOOTSTRAP_OWNER" "value" .Values.bootstrap.owner) }}
 # The first admin token and the org key, made once after the first install and kept in the
 # Secret <release>-initial-admin (README.md, "First tokens"). The steps and their scripts are in
 # templates/_bootstrap.tpl. The Secret and the status ConfigMap are not part of the release:
 # they outlive an uninstall, like the store's admin they belong to.
+{{- if $ownAccount }}
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -19,6 +28,9 @@ metadata:
     helm.sh/hook-weight: "-10"
     helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
 ---
+{{- end }}
+# The Role is bound to the Job's service account only while the hook runs: Helm deletes both
+# when the Job succeeds.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -64,7 +76,7 @@ roleRef:
   name: {{ $name }}
 subjects:
   - kind: ServiceAccount
-    name: {{ $name }}
+    name: {{ $serviceAccount }}
     namespace: {{ .Release.Namespace }}
 ---
 apiVersion: batch/v1
@@ -86,11 +98,16 @@ spec:
       labels:
         {{- include "seshi.releaseLabels" . | nindent 8 }}
         app.kubernetes.io/component: bootstrap
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
     spec:
       # A failed step restarts in this pod, which keeps /work and the tokens in it.
       restartPolicy: OnFailure
       enableServiceLinks: false
-      serviceAccountName: {{ $name }}
+      serviceAccountName: {{ $serviceAccount }}
+      # The Kubernetes API token goes only to the curl steps (the kube-api volume), not to seshi.
+      automountServiceAccountToken: false
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
@@ -126,6 +143,7 @@ spec:
               mountPath: /tmp
             - name: work
               mountPath: /work
+            {{- with include "seshi.storeVolumeMounts" . | trim }}{{ . | nindent 12 }}{{ end }}
             {{- with .Values.extraVolumeMounts }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -147,6 +165,9 @@ spec:
           volumeMounts:
             - name: work
               mountPath: /work
+            - name: kube-api
+              mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+              readOnly: true
         - name: admin-init
           image: {{ include "seshi.image" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
@@ -177,6 +198,7 @@ spec:
               mountPath: /tmp
             - name: work
               mountPath: /work
+            {{- with include "seshi.storeVolumeMounts" . | trim }}{{ . | nindent 12 }}{{ end }}
             {{- with .Values.extraVolumeMounts }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -199,6 +221,9 @@ spec:
           volumeMounts:
             - name: work
               mountPath: /work
+            - name: kube-api
+              mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+              readOnly: true
       volumes:
         {{- include "seshi.configVolume" . | nindent 8 }}
         # admin init needs a /data, not the server's: the store is a bucket here.
@@ -210,6 +235,24 @@ spec:
           emptyDir:
             medium: Memory
             sizeLimit: 1Mi
+        # What automountServiceAccountToken would mount, for the curl steps alone.
+        - name: kube-api
+          projected:
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  expirationSeconds: 3600
+              - configMap:
+                  name: kube-root-ca.crt
+                  items:
+                    - key: ca.crt
+                      path: ca.crt
+              - downwardAPI:
+                  items:
+                    - path: namespace
+                      fieldRef:
+                        fieldPath: metadata.namespace
+        {{- with include "seshi.storeVolumes" . | trim }}{{ . | nindent 8 }}{{ end }}
         {{- with .Values.extraVolumes }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
