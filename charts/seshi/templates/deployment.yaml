@@ -35,7 +35,7 @@ spec:
       # start on a SESHI_* variable that is not a setting.
       enableServiceLinks: false
       automountServiceAccountToken: false
-      serviceAccountName: {{ include "seshi.serviceAccountName" . }}
+      serviceAccountName: {{ include "seshi.serviceAccountName" . | quote }}
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}

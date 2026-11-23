@@ -9,6 +9,9 @@ reach, so the Job then gets an account of its own. */}}
 {{- $serviceAccount := include "seshi.serviceAccountName" . }}
 {{- $ownAccount := not .Values.serviceAccount.create }}
 {{- if $ownAccount }}
+{{- if eq $serviceAccount $name }}
+{{- fail (printf "serviceAccount.name %s is the bootstrap Job's own account, which the hook deletes and makes again: name another account, or set serviceAccount.create" $name) }}
+{{- end }}
 {{- $serviceAccount = $name }}
 {{- end }}
 {{- /* Kubernetes expands $(NAME) in env values; $$ keeps a $ in the URL literal. */}}
@@ -21,7 +24,7 @@ reach, so the Job then gets an account of its own. */}}
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: {{ $name }}
+  name: {{ $name | quote }}
   labels:
     {{- include "seshi.releaseLabels" . | nindent 4 }}
     app.kubernetes.io/component: bootstrap
@@ -78,7 +81,7 @@ roleRef:
   name: {{ $name }}
 subjects:
   - kind: ServiceAccount
-    name: {{ $serviceAccount }}
+    name: {{ $serviceAccount | quote }}
     namespace: {{ .Release.Namespace }}
 ---
 apiVersion: batch/v1
@@ -107,7 +110,7 @@ spec:
       # A failed step restarts in this pod, which keeps /work and the tokens in it.
       restartPolicy: OnFailure
       enableServiceLinks: false
-      serviceAccountName: {{ $serviceAccount }}
+      serviceAccountName: {{ $serviceAccount | quote }}
       # The Kubernetes API token goes only to the curl steps (the kube-api volume), not to seshi.
       automountServiceAccountToken: false
       {{- with .Values.imagePullSecrets }}

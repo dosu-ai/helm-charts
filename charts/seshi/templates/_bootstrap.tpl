@@ -31,14 +31,17 @@ has() { grep -q "^store\.$1 = " /work/config.txt; }
 setting() { sed -n "s/^store\.$1 = \"\(.*\)\"\$/\1/p" /work/config.txt; }
 # AZURE_STORAGE_CONNECTION_STRING as seshi reads it: `name=value` parts split on `;`, trimmed,
 # the last of a name winning; UseDevelopmentStorage=true supplies Azurite's account and endpoint
-# unless the string gives its own. A part given empty is still given.
+# unless the string gives its own. A part given empty is still given. ws is what JavaScript's
+# trim() removes, as UTF-8 bytes: ASCII space and controls, U+00A0, U+1680, U+2000-U+200A,
+# U+2028, U+2029, U+202F, U+205F, U+3000 and U+FEFF.
+ws='([[:space:]]|\xc2\xa0|\xe1\x9a\x80|\xe2\x80[\x80-\x8a]|\xe2\x80[\xa8\xa9\xaf]|\xe2\x81\x9f|\xe3\x80\x80|\xef\xbb\xbf)'
 given() {
   printf '%s' "${AZURE_STORAGE_CONNECTION_STRING:-}" | tr ';' '\n' |
-    grep -q "^[[:space:]]*$1[[:space:]]*="
+    LC_ALL=C sed -En "s/^$ws*$1$ws*=.*/given/p" | grep -q given
 }
 part() {
   printf '%s' "${AZURE_STORAGE_CONNECTION_STRING:-}" | tr ';' '\n' |
-    sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*//p" | tail -n 1 | sed 's/[[:space:]]*$//'
+    LC_ALL=C sed -En "s/^$ws*$1$ws*=$ws*//p" | tail -n 1 | LC_ALL=C sed -E "s/$ws*\$//"
 }
 development() { [ "$(part UseDevelopmentStorage | tr '[:upper:]' '[:lower:]')" = true ]; }
 conn_has() {

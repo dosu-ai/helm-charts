@@ -178,9 +178,9 @@ if [ "$STORE" = az ]; then
   exclude="$(bun -e '
     const status = await Bun.file(process.argv[1]).json();
     if (status.runtime_config !== "store") throw new Error(`runtime_config ${status.runtime_config}`);
-    console.log((status.effective?.capture?.exclude ?? []).join(" "));
+    console.log(JSON.stringify(status.effective?.capture?.exclude ?? null));
   ' "$WORK/config.json")" || fail "GET /v1/admin/config did not say runtime_config store"
-  [ "$exclude" = "acme/secret acme/runtime" ] ||
+  [ "$exclude" = '["acme/secret","acme/runtime"]' ] ||
     fail "the new pod's capture.exclude is '$exclude', not the values' entry and the bucket's"
 fi
 

@@ -101,6 +101,17 @@ const REFUSED: { name: string; args: string[]; error: string }[] = [
     error: "serviceAccountKey is empty",
   },
   {
+    name: "a server account named like the bootstrap's own",
+    args: [
+      ...S3,
+      "--set",
+      "serviceAccount.create=false",
+      "--set",
+      "serviceAccount.name=seshi-bootstrap",
+    ],
+    error: "the bootstrap Job's own account",
+  },
+  {
     name: "an ingress with no hosts",
     args: [...S3, "--set", "ingress.enabled=true"],
     error: "ingress.hosts",
@@ -391,6 +402,12 @@ function checkAwkwardInputs(): string[] {
       throw new Error(`the bootstrap's STORE_URL does not escape $: ${value}`);
     }
   }
+  // A ServiceAccount name YAML would read as a boolean, made by the chart or not.
+  for (const create of ["true", "false"]) {
+    const args = [...S3, "--set", `serviceAccount.create=${create}`];
+    args.push("--set-string", "serviceAccount.name=true");
+    rendered.push(must(["helm", "template", RELEASE, CHART, ...args], `account true (${create})`));
+  }
   // Secret keys that YAML would read as numbers: kubeconform checks these render as strings.
   for (const [url, key] of [
     ["az://c/p", "accountKey"],
@@ -442,6 +459,18 @@ const FINGERPRINTS: { name: string; a: Setup; b: Setup; same: boolean }[] = [
     b: {
       set: ["store.url=az://c/p"],
       env: { AZURE_STORAGE_CONNECTION_STRING: `${GOV};BlobEndpoint=` },
+    },
+    same: false,
+  },
+  {
+    name: "az:// a BlobEndpoint after a non-breaking space",
+    a: { set: ACCT },
+    b: {
+      set: ACCT,
+      env: {
+        AZURE_STORAGE_CONNECTION_STRING:
+          "AccountName=acct;\u00a0BlobEndpoint=http://127.0.0.1:10000/acct",
+      },
     },
     same: false,
   },

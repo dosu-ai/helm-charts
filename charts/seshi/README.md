@@ -122,8 +122,13 @@ the namespace, read its Secret, and read and replace its ConfigMap. Only the two
 mount the Kubernetes API token; the seshi steps never see it. Helm deletes the Role and its
 binding when the Job succeeds or fails, and the Job itself when it succeeds. One case escapes
 that: when the API refuses to create the Job at all (a ResourceQuota on Jobs, an admission
-policy), Helm stops with the Role and binding in place. Delete `<release>-bootstrap`'s Role and
-RoleBinding by hand then, or the next install replaces them. Under an egress NetworkPolicy, the Job must reach the Kubernetes API
+policy), Helm stops with the Role and binding in place, and the Job's own ServiceAccount when
+it has one. Delete them by hand then, or the next install replaces them:
+
+```sh
+kubectl -n seshi delete role,rolebinding,serviceaccount \
+  -l app.kubernetes.io/instance=seshi,app.kubernetes.io/component=bootstrap
+``` Under an egress NetworkPolicy, the Job must reach the Kubernetes API
 as well as the bucket. The Secret and the ConfigMap are not part of the release: they outlive
 `helm uninstall`, like the store's admin they belong to. seshi never reads the Secret: copy the
 tokens to a password manager and delete it when you like.
