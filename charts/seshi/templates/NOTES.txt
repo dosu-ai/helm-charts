@@ -1,5 +1,9 @@
 seshi {{ .Chart.AppVersion }} is starting as {{ include "seshi.fullname" . }} in {{ .Release.Namespace }}.
 
+{{- if gt (int .Values.api.replicas) 1 }}
+It runs {{ .Values.api.replicas }} API pods (deploy/{{ include "seshi.fullname" . }}) and one worker pod (deploy/{{ include "seshi.suffixed" (dict "root" . "suffix" "worker") }}).
+{{- end }}
+
 In the cluster it answers at http://{{ include "seshi.fullname" . }}.{{ .Release.Namespace }}.svc:{{ .Values.service.port }}.
 {{- if .Values.ingress.enabled }}
 {{- range .Values.ingress.hosts }}

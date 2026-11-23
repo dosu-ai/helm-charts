@@ -88,6 +88,13 @@ bootstrap:
   curlImage: curlimages/curl:8.17.0@sha256:935d9100e9ba842cdb060de42472c7ca90cfe9a7c96e4dacb55e79e560b3ff40
   resources: {}
 
+# API pods (README.md, "Several API pods"). 1: one pod runs both roles, the API and the worker.
+# More: that many API pods behind the Service, each with its own search index on an emptyDir,
+# and one worker pod beside them. Not with a folder store or persistence.enabled. Pair it with
+# config.server.runtime_config: store, so a change through the admin API reaches every pod.
+api:
+  replicas: 1
+
 # /data: the search index, and a file:// store.
 persistence:
   # false: an emptyDir. A new pod then rebuilds the search index from the bucket, and search

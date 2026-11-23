@@ -107,6 +107,13 @@
         "resources": { "type": "object" }
       }
     },
+    "api": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "replicas": { "type": "integer", "minimum": 1 }
+      }
+    },
     "persistence": { "$ref": "#/definitions/claim" },
     "extraEnv": { "$ref": "#/definitions/list" },
     "envFrom": { "$ref": "#/definitions/list" },

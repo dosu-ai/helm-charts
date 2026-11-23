@@ -8,8 +8,8 @@
 #
 # STORE picks the bucket:
 #   s3 (default) RustFS, ci/kind-values.yaml; also the bootstrap's reinstall cases
-#   az           Azurite, ci/kind-az-values.yaml; also the runtime config in the bucket, which
-#                must outlive the pod
+#   az           Azurite, ci/kind-az-values.yaml: two API pods and a worker pod; also the
+#                runtime config in the bucket, which must reach both API pods and outlive them
 #   gs           fake-gcs-server, ci/kind-gs-values.yaml; also the mounted service account key
 #
 # Needs kubectl, helm, bun, curl, and for s3 aws (the AWS CLI). It works only in the kind
@@ -56,12 +56,13 @@ fail() {
   exit 1
 }
 
-forward() { # forward <service> <local port> <remote port>
+forward() { # forward <service or pod/name> <local port> <remote port>
   if (exec 3<>"/dev/tcp/127.0.0.1/$2") 2>/dev/null; then
     fail "port $2 is already in use (a port-forward left from an earlier run?)"
   fi
   # exec, so $! is kubectl itself: killing a subshell would leave the forward running.
-  (exec kubectl --context "$CONTEXT" -n "$NS" port-forward "svc/$1" "$2:$3" >/dev/null 2>&1) &
+  case "$1" in */*) target="$1" ;; *) target="svc/$1" ;; esac
+  (exec kubectl --context "$CONTEXT" -n "$NS" port-forward "$target" "$2:$3" >/dev/null 2>&1) &
   PIDS+=("$!")
   for _ in $(seq 1 30); do
     if (exec 3<>"/dev/tcp/127.0.0.1/$2") 2>/dev/null; then return 0; fi
@@ -144,8 +145,12 @@ for _ in $(seq 1 30); do
   fi
   sleep 1
 done || true
-k -n "$NS" exec "deploy/$RELEASE" -- seshi workers status --json |
-  grep -q '"state": "running"' || fail "the worker is not running"
+k -n "$NS" exec "deploy/$RELEASE" -- seshi workers status --json >"$WORK/workers.json"
+grep -q '"state": "running"' "$WORK/workers.json" || fail "the worker is not running"
+if [ "$STORE" = az ]; then
+  # The heartbeat names the instance that writes it: the worker pod, not an API pod.
+  grep -q "\"$RELEASE-worker-" "$WORK/workers.json" || fail "the worker pod does not run the worker"
+fi
 
 echo "--- upload, read back, search"
 forward "$RELEASE" 17200 7200
@@ -157,10 +162,31 @@ admin() { # admin <port> <method> <path> [json body]: the admin API, with the bo
   curl -sS --fail-with-body -X "$2" -H "authorization: Bearer $admin_token" \
     -H 'content-type: application/json' ${4:+-d "$4"} "http://127.0.0.1:$1$3"
 }
+# effective_exclude <port>: the capture.exclude in effect on the pod behind that port, as JSON.
+effective_exclude() {
+  admin "$1" GET /v1/admin/config >"$WORK/config.json" || fail "GET /v1/admin/config failed"
+  # shellcheck disable=SC2016 # JavaScript, not shell
+  bun -e '
+    const status = await Bun.file(process.argv[1]).json();
+    if (status.runtime_config !== "store") throw new Error(`runtime_config ${status.runtime_config}`);
+    console.log(JSON.stringify(status.effective?.capture?.exclude ?? null));
+  ' "$WORK/config.json" || fail "GET /v1/admin/config did not say runtime_config store"
+}
+want='["acme/secret","acme/runtime"]'
 if [ "$STORE" = az ]; then
-  echo "--- runtime config in the bucket: an admin API change"
+  echo "--- runtime config in the bucket: an admin API change reaches every API pod"
   admin 17200 PATCH /v1/admin/config '{"set":{"capture.exclude":["acme/runtime"]}}' >/dev/null ||
     fail "PATCH /v1/admin/config was refused"
+  admin 17200 GET '/v1/admin/config?wait=30s' | grep -q '"converged": *true' ||
+    fail "the instances did not all apply the change within 30 seconds"
+  port=17300
+  for pod in $(k -n "$NS" get pods -l app.kubernetes.io/component=server -o name); do
+    forward "$pod" "$port" 7200
+    got="$(effective_exclude "$port")"
+    [ "$got" = "$want" ] || fail "$pod runs capture.exclude $got, not $want"
+    port=$((port + 1))
+  done
+  [ "$port" = 17302 ] || fail "expected two API pods, found $((port - 17300))"
 fi
 
 echo "--- a new pod"
@@ -171,17 +197,10 @@ forward "$RELEASE" 17201 7200
 bun "$ROOT/scripts/seshi-smoke.ts" http://127.0.0.1:17201 "$WORK/init.json" search ||
   fail "search after a restart failed"
 if [ "$STORE" = az ]; then
-  echo "--- runtime config in the bucket: the change outlived the pod"
-  admin 17201 GET /v1/admin/config >"$WORK/config.json" || fail "GET /v1/admin/config failed"
-  # The list in effect on the new pod: the values' entry, then the bucket's.
-  # shellcheck disable=SC2016 # JavaScript, not shell
-  exclude="$(bun -e '
-    const status = await Bun.file(process.argv[1]).json();
-    if (status.runtime_config !== "store") throw new Error(`runtime_config ${status.runtime_config}`);
-    console.log(JSON.stringify(status.effective?.capture?.exclude ?? null));
-  ' "$WORK/config.json")" || fail "GET /v1/admin/config did not say runtime_config store"
-  [ "$exclude" = '["acme/secret","acme/runtime"]' ] ||
-    fail "the new pod's capture.exclude is '$exclude', not the values' entry and the bucket's"
+  echo "--- runtime config in the bucket: the change outlived the pods"
+  # The list in effect on a new pod: the values' entry, then the bucket's.
+  got="$(effective_exclude 17201)"
+  [ "$got" = "$want" ] || fail "a new pod runs capture.exclude $got, not $want"
 fi
 
 echo "--- reinstall: the Secret is this store's, so it is kept"

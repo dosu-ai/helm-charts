@@ -102,7 +102,7 @@ app.kubernetes.io/component: server
 {{- fail "config.server.listen: the chart listens on :7200; set service.port to change the Service's port" }}
 {{- end }}
 {{- if hasKey $server "roles" }}
-{{- fail "config.server.roles: this chart runs one instance with both roles" }}
+{{- fail "config.server.roles: the chart sets each pod's roles (api.replicas)" }}
 {{- end }}
 {{- if or (hasPrefix "file:" $url) (hasPrefix "/" $url) }}
 {{- if not .Values.persistence.enabled }}
@@ -110,6 +110,14 @@ app.kubernetes.io/component: server
 {{- end }}
 {{- if or (not (regexMatch "^(file://)?/data(/[A-Za-z0-9._-]+)*/?$" $url)) (regexMatch "(^|/)\\.\\.(/|$)" $url) }}
 {{- fail "store.url: a folder store must be under /data (file:///data/store), the only folder on the claim" }}
+{{- end }}
+{{- end }}
+{{- if gt (int .Values.api.replicas) 1 }}
+{{- if include "seshi.folderStore" . }}
+{{- fail "api.replicas: a folder store lives on one pod's claim; several API pods need a bucket" }}
+{{- end }}
+{{- if .Values.persistence.enabled }}
+{{- fail "api.replicas above 1 with persistence.enabled: each API pod keeps its own search index, on an emptyDir; one claim cannot hold them all" }}
 {{- end }}
 {{- end }}
 {{- $c := .Values.store.credentials }}

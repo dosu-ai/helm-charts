@@ -112,6 +112,23 @@ const REFUSED: { name: string; args: string[]; error: string }[] = [
     error: "the bootstrap Job's own account",
   },
   {
+    name: "several API pods with a claim",
+    args: [...S3, "--set", "api.replicas=2", "--set", "persistence.enabled=true"],
+    error: "persistence.enabled",
+  },
+  {
+    name: "several API pods on a folder store",
+    args: [
+      "--set",
+      "store.url=file:///data/store",
+      "--set",
+      "persistence.enabled=true",
+      "--set",
+      "api.replicas=2",
+    ],
+    error: "several API pods need a bucket",
+  },
+  {
     name: "an ingress with no hosts",
     args: [...S3, "--set", "ingress.enabled=true"],
     error: "ingress.hosts",
@@ -287,6 +304,7 @@ function checkValues(file: string, scratch: string): string {
     if (spec !== undefined) checkMounts(doc, spec);
   }
 
+  checkRoles(file, docs);
   const deployment = docs.find((d) => d.kind === "Deployment");
   const spec = deployment && podSpec(deployment);
   const container = spec?.containers.find((c) => c.name === "seshi");
@@ -331,6 +349,23 @@ function checkValues(file: string, scratch: string): string {
     if (!origins.has(dropIn)) throw new Error(`seshi never read the drop-in ${dropIn}`);
   }
   return rendered;
+}
+
+/** Exactly one pod runs the worker, and the pods the Service selects serve the API. */
+function checkRoles(file: string, docs: Manifest[]): void {
+  let workers = 0;
+  for (const doc of docs.filter((d) => d.kind === "Deployment")) {
+    const args = podSpec(doc)?.containers.find((c) => c.name === "seshi")?.args ?? [];
+    const roles = (args[args.indexOf("--roles") + 1] ?? "").split(",");
+    const replicas = (doc.spec as { replicas?: number } | undefined)?.replicas ?? 1;
+    const component = (doc.spec?.template as { metadata?: { labels?: Record<string, string> } })
+      ?.metadata?.labels?.["app.kubernetes.io/component"];
+    if (roles.includes("worker")) workers += replicas;
+    if (component === "server" && !roles.includes("api")) {
+      throw new Error(`${file}: ${doc.metadata?.name} is behind the Service but runs no API`);
+    }
+  }
+  if (workers !== 1) throw new Error(`${file}: ${workers} pods run the worker, not 1`);
 }
 
 const KUBE_API = "/var/run/secrets/kubernetes.io/serviceaccount";

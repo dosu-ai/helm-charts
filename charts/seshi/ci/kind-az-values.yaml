@@ -1,5 +1,6 @@
 # The install test on kind with STORE=az: an Azurite container in the namespace, its published
-# development account key in the Secret seshi-store, and the runtime config in the bucket.
+# development account key in the Secret seshi-store, two API pods and a worker pod, and the
+# runtime config in the bucket, which a change through one pod must carry to the other.
 store:
   url: az://seshi-e2e/sessions
   accountName: devstoreaccount1
@@ -18,6 +19,5 @@ dropIns:
   10-capture:
     capture:
       exclude: [acme/secret]
-persistence:
-  enabled: true
-  size: 1Gi
+api:
+  replicas: 2

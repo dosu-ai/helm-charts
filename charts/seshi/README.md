@@ -47,6 +47,7 @@ keys. The ones most installs set:
 | `redactionPacks` | Rule packs, by file name ([redaction.md](https://github.com/dosu-ai/seshi/blob/main/docs/redaction.md)) |
 | `bootstrap.*` | The first admin token ([below](#first-tokens)) |
 | `persistence.enabled` | `/data` on a PersistentVolumeClaim instead of an emptyDir ([below](#storage)) |
+| `api.replicas` | Several API pods and one worker pod, in place of one pod with both roles ([below](#several-api-pods)) |
 | `ingress.*`, `networkPolicy.*`, `resources`, `probes` | The usual Kubernetes settings |
 
 The chart writes `seshi.toml` into a ConfigMap mounted at `/etc/seshi`, and sets
@@ -54,8 +55,8 @@ The chart writes `seshi.toml` into a ConfigMap mounted at `/etc/seshi`, and sets
 without a flag. A change to the config restarts the pod. The chart sets `[store]`,
 `server.listen` (`:7200`) and, unless `config.search.path` says otherwise, `search.path`
 (`/data/search/index.sqlite`). It refuses `config.store`, `config.server.listen` and
-`config.server.roles`, and starts seshi with `--listen :7200 --roles api,worker` and
-`--set store.url=…`, which win over any `SESHI_*` variable.
+`config.server.roles`, and starts seshi with `--listen :7200`, `--roles` (`api,worker`, or
+per pod with `api.replicas`) and `--set store.url=…`, which win over any `SESHI_*` variable.
 
 ### Secrets
 
@@ -186,8 +187,9 @@ for a folder store (`file:///data/…`).
   the search index from the bucket's change feed. Until it has caught up, `GET /v1/search` and
   `GET /v1/changes/all` answer `503 index_building`; uploads and reads are unaffected.
 - `persistence.enabled: true` puts `/data` on a claim (`persistence.size`, `storageClass`,
-  `existingClaim`). The index survives restarts. Recommended for production, and for readers of
-  `/v1/changes/all`.
+  `existingClaim`). The index survives restarts. Recommended for a single pod in production,
+  and for readers of `/v1/changes/all`. With several API pods each keeps its own index on an
+  emptyDir instead ([below](#several-api-pods)).
 
 A folder store must be a plain path under `/data` (letters, digits, `.`, `_`, `-`; no `..`)
 and needs `persistence.enabled`;
@@ -243,13 +245,45 @@ extraEnv:
 
 The server does not start when it cannot read the bucket's runtime config.
 
-## One pod
+## Several API pods
 
-The chart runs one replica with both roles. Exactly one instance may run the worker and each
-API instance builds its own search index, so there is no `replicas` value. Upgrades use the `Recreate` strategy:
-the old pod stops before the new one starts, and uploaders retry through the gap. A pod deleted
-by hand can overlap its replacement for the few seconds it takes to stop; seshi's checkpoints
-and deduplication tolerate a second worker for that long.
+By default one pod runs both roles, the API and the worker. Upgrades use the `Recreate`
+strategy: the old pod stops before the new one starts, and uploaders retry through the gap. A
+pod deleted by hand can overlap its replacement for the few seconds it takes to stop; seshi's
+checkpoints and deduplication tolerate a second worker for that long.
+
+`api.replicas` above 1 splits the roles ([server.md](https://github.com/dosu-ai/seshi/blob/main/docs/server.md#roles-and-background-work)):
+
+- **API pods.** `deploy/<fullname>` runs that many pods with `--roles api` behind the Service,
+  and upgrades them one at a time (`RollingUpdate`, `maxUnavailable: 0`). They share nothing
+  but the bucket.
+- **One worker pod.** `deploy/<fullname>-worker` runs `--roles worker` (the pollers, the span
+  assembler, retention, the sweep and the heartbeat) with `Recreate`, because seshi wants
+  exactly one worker. It serves only `/healthz`, and the Service does not select it.
+
+```yaml
+api:
+  replicas: 3
+config:
+  server:
+    runtime_config: store
+```
+
+Each API pod keeps its own search index on an emptyDir and builds it from the bucket when it
+starts. Until a pod has caught up, its `GET /v1/search` and `GET /v1/changes/all` answer
+`503 index_building` with `Retry-After`, while the other pods answer normally; `/healthz`
+does not wait for the index, so the new pod takes traffic at once. A session one pod stores is
+searchable on the others within `search.interval`. Because one claim cannot hold an index for
+every pod, the chart refuses `persistence.enabled` with more than one API pod, and a folder
+store, which lives on a claim.
+
+Files from the chart reach every pod on each `helm upgrade`, which restarts them. A change made
+through the admin API is the one that needs `runtime_config: store`: without it the admin
+API's write routes answer `409 runtime_config_off`, and `POST /v1/admin/reload` reloads only
+the pod that answers it. With it, the pod that takes a change applies it at once and the others
+within `server.config_poll` (10 seconds); `GET /v1/admin/config?wait=30s` waits until they all
+run it. A revoked token stops at once on the pod that revoked it and within 30 seconds on the
+others.
 
 ## Ingress and network policy
 
