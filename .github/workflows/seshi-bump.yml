@@ -1,0 +1,118 @@
+name: seshi-bump
+
+# Proposes each new seshi release: when ghcr.io/dosu-ai/seshi has a newer x.y.z image than the
+# chart's appVersion, it opens a pull request that moves the chart to it
+# (scripts/seshi-bump.ts) and closes an older such pull request still open. Events made with
+# GITHUB_TOKEN start no workflows except workflow_dispatch, so it dispatches ci.yml on the
+# branch itself; the checks then show on the pull request as usual.
+on:
+  schedule:
+    - cron: "23 */6 * * *" # every 6 hours
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: seshi-bump
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write # push the branch
+      pull-requests: write # open and close the pull requests
+      actions: write # dispatch ci.yml on the branch
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.3
+      - name: Find the newest seshi image
+        id: bump
+        run: bun scripts/seshi-bump.ts --write
+      - name: Open the pull request
+        id: open
+        if: steps.bump.outputs.seshi != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SESHI: ${{ steps.bump.outputs.seshi }}
+          CHART: ${{ steps.bump.outputs.chart }}
+          KIND: ${{ steps.bump.outputs.kind }}
+        run: |
+          # Each part checks its own state, so a run that failed partway (the push made, the
+          # pull request or the CI dispatch not) is finished by the next one.
+          remote="https://x-access-token:$GH_TOKEN@github.com/$REPO.git"
+          branch="seshi-bump/$SESHI"
+          case "$KIND" in minor) type=feat ;; *) type=fix ;; esac
+          title="$type(seshi): run seshi $SESHI"
+          # The pull request for this release, open or not. Only pull requests from this
+          # repository count: --head matches a fork's branch of the same name too. One closed
+          # without merging was declined: propose nothing more for this release.
+          gh pr list --repo "$REPO" --head "$branch" --state all --json url,state,isCrossRepository \
+            --jq '[.[] | select(.isCrossRepository | not)][0] // empty | "\(.state) \(.url)"' >"$RUNNER_TEMP/pr.txt"
+          read -r state url <"$RUNNER_TEMP/pr.txt" || true
+          case "${state:-}" in
+            OPEN) echo "open: $url" ;;
+            "")
+              if git ls-remote --exit-code "$remote" "refs/heads/$branch" >/dev/null; then
+                echo "$branch exists"
+              else
+                git config user.name "github-actions[bot]"
+                git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+                git switch -c "$branch"
+                git commit -qam "$title"
+                git push -q "$remote" "HEAD:refs/heads/$branch"
+                echo "pushed $branch"
+              fi
+              cat >"$RUNNER_TEMP/body.md" <<EOF
+          Moves the seshi chart to seshi $SESHI ([release notes](https://github.com/dosu-ai/seshi/releases/tag/v$SESHI)): \`appVersion\` $SESHI, chart \`version\` $CHART.
+
+          CI runs on this branch through a dispatch of \`ci.yml\`: \`seshi-check\` checks every config the chart renders with the new image, and the kind jobs install it. Before merging, read the release notes for new settings or behavior the chart or its README should follow, and push those changes to this branch.
+          EOF
+              url="$(gh pr create --repo "$REPO" --base main --head "$branch" --title "$title" --body-file "$RUNNER_TEMP/body.md")"
+              state=OPEN
+              echo "opened $url"
+              ;;
+            *) echo "$url is $state: seshi $SESHI is not proposed again" ;;
+          esac
+          if [ "$state" = OPEN ] &&
+            [ "$(gh run list --repo "$REPO" --workflow ci.yml --branch "$branch" --json databaseId --jq length)" = 0 ]; then
+            gh workflow run ci.yml --repo "$REPO" --ref "$branch"
+            echo "dispatched ci.yml on $branch"
+          fi
+          [ "$state" = OPEN ] && echo "url=$url" >>"$GITHUB_OUTPUT"
+          exit 0
+      # On every run, even when the chart is current or the step above failed: every
+      # seshi-bump branch in this repository but the newest release's is superseded. Close its
+      # pull request if still open, then delete the branch. Keyed on the branches, so a run that
+      # closed a pull request but failed to delete its branch is finished by the next.
+      - name: Clean up older seshi-bump branches
+        if: ${{ !cancelled() && steps.bump.outcome == 'success' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SESHI: ${{ steps.bump.outputs.seshi }}
+          URL: ${{ steps.open.outputs.url }}
+        run: |
+          remote="https://x-access-token:$GH_TOKEN@github.com/$REPO.git"
+          keep="${SESHI:+seshi-bump/$SESHI}"
+          if [ -n "$SESHI" ]; then reason="Superseded by seshi $SESHI${URL:+: $URL}."
+          else reason="Superseded: the chart already runs the newest seshi."; fi
+          git ls-remote --heads "$remote" 'refs/heads/seshi-bump/*' | sed 's|.*refs/heads/||' |
+            while read -r old; do
+              [ "$old" = "$keep" ] && continue
+              gh pr list --repo "$REPO" --head "$old" --state open --json number,isCrossRepository \
+                --jq '.[] | select(.isCrossRepository | not) | .number' |
+                while read -r number; do
+                  gh pr close "$number" --repo "$REPO" --comment "$reason"
+                done
+              git push -q "$remote" --delete "$old"
+              echo "deleted $old"
+            done
