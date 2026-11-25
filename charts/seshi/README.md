@@ -109,9 +109,10 @@ failure, or the Job giving up after its retries) loses them with it; the next ru
   Job fails, and its log gives the commands that make new tokens in the server pod
   (`seshi admin init --force`, `--rotate-org-key`), and the one that marks the ConfigMap
   `already-initialized` so a reinstall does not stop at the same place. When only the admin
-  token was lost, the
-  Secret holds the org key, carries `seshi.dosu.ai/bootstrap: admin-token-lost`, and the Job
-  refuses it on every later install until you replace it.
+  token was lost, the Secret holds the org key and carries
+  `seshi.dosu.ai/bootstrap: admin-token-lost`, and the Job refuses it on every later install.
+  The log then gives `seshi admin init --force` and the `kubectl annotate` command that clears
+  the note, after which the Secret counts as this store's.
 - **Not on upgrade.** The Job runs on `helm install` only. Turning `bootstrap.enabled` on later
   does nothing; run `seshi admin init` in the server pod instead.
 - **Not for a folder store.** The server pod holds the claim, so make the tokens there.

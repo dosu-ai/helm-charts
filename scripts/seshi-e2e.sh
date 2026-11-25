@@ -232,6 +232,19 @@ for object in role rolebinding; do
 done
 k -n "$NS" annotate secret "$secret" "seshi.dosu.ai/store=$store" --overwrite >/dev/null
 
+echo "--- reinstall: a Secret noted admin-token-lost stops the bootstrap until the printed repair"
+k -n "$NS" annotate secret "$secret" seshi.dosu.ai/bootstrap=admin-token-lost --overwrite >/dev/null
+reinstall 60s && fail "the bootstrap accepted a Secret that lost its admin token"
+job_log check | grep -q "lost the store's first admin token" ||
+  fail "the bootstrap did not say the admin token was lost"
+# The log's last command clears the note; run it as an operator would.
+repair="$(job_log check | grep -o "kubectl -n $NS annotate secret .*")" ||
+  fail "the bootstrap did not print how to clear the note"
+eval "k ${repair#kubectl }" >/dev/null || fail "the printed repair failed: $repair"
+reinstall 3m || fail "a reinstall after clearing the note failed"
+[ "$(k -n "$NS" get secret "$secret" -o jsonpath='{.metadata.creationTimestamp}')" = "$created" ] ||
+  fail "the reinstall replaced $secret"
+
 echo "--- reinstall: tokens an earlier run made but never saved are reported, not ignored"
 k -n "$NS" get secret "$secret" -o yaml >"$WORK/secret.yaml"
 k -n "$NS" delete secret "$secret" >/dev/null

@@ -165,15 +165,27 @@ JSON
 {{- end }}
 
 {{/* The commands that make new tokens by hand, in the server pod, with STORE_URL as one
-shell-quoted word. */}}
+shell-quoted word, and the one that lets a reinstall go on. Takes (dict "root" . "lost" L): L is
+"both" when no Secret was written, "admin" when the Secret holds the org key and the note
+admin-token-lost, which stops every later install until it is cleared. */}}
 {{- define "seshi.bootstrapRecovery" -}}
+{{- $root := .root }}
+{{- $exec := printf "kubectl -n %s exec deploy/%s -- seshi admin init" $root.Release.Namespace (include "seshi.fullname" $root) -}}
 word="'$(printf '%s' "store.url=$STORE_URL" | sed "s/'/'\\\\''/g")'"
+{{- if eq .lost "admin" }}
+printf '%s\n' \
+  "Make a new admin token in the server pod and keep it yourself:" \
+  "  {{ $exec }} --force --json --set $word" \
+  "Then revoke the lost one (seshi tokens list, seshi tokens revoke), and clear the note on {{ include "seshi.bootstrapSecretName" $root }}, which keeps the org key, so a reinstall goes on:" \
+  "  kubectl -n {{ $root.Release.Namespace }} annotate secret {{ include "seshi.bootstrapSecretName" $root }} seshi.dosu.ai/bootstrap-" >&2
+{{- else }}
 printf '%s\n' \
   "Make new ones in the server pod and keep them yourself:" \
-  "  kubectl -n {{ .Release.Namespace }} exec deploy/{{ include "seshi.fullname" . }} -- seshi admin init --force --json --set $word   # another admin token" \
-  "  kubectl -n {{ .Release.Namespace }} exec deploy/{{ include "seshi.fullname" . }} -- seshi admin init --rotate-org-key --json --set $word   # a new org key; members sign in again" \
+  "  {{ $exec }} --force --json --set $word   # another admin token" \
+  "  {{ $exec }} --rotate-org-key --json --set $word   # a new org key; members sign in again" \
   "Then revoke the lost admin token (seshi tokens list, seshi tokens revoke), and record that the store has its admin, so a reinstall goes on:" \
-  "  kubectl -n {{ .Release.Namespace }} patch configmap {{ include "seshi.bootstrapStatusName" . }} --type merge -p '{\"data\":{\"status\":\"already-initialized\"}}'" >&2
+  "  kubectl -n {{ $root.Release.Namespace }} patch configmap {{ include "seshi.bootstrapStatusName" $root }} --type merge -p '{\"data\":{\"status\":\"already-initialized\"}}'" >&2
+{{- end }}
 {{- end }}
 
 {{/* Step 1, before any token exists: is there anything to do, and is it safe? */}}
@@ -185,7 +197,7 @@ case "$code" in
     if [ "$(answer_store)" = "$store" ]; then
       if [ "$(answer_note)" = admin-token-lost ]; then
         echo "$secret holds only the org key: an earlier bootstrap lost the store's first admin token." >&2
-        {{- include "seshi.bootstrapRecovery" . | nindent 8 }}
+        {{- include "seshi.bootstrapRecovery" (dict "root" . "lost" "admin") | nindent 8 }}
         exit 1
       fi
       echo "$secret already holds this store's first tokens"
@@ -218,9 +230,16 @@ and never handed on. */}}
 set -u
 [ -e /work/done ] && exit 0
 # A restart after seshi printed the tokens (the container stopped before it could exit 0):
-# keep them. Asking again would only say "already set up", and they would be lost.
-if [ -e /work/attempted ] && grep -q '"token": "' /work/init.json 2>/dev/null &&
-  [ "$(tail -c 2 /work/init.json | tr -d '\n')" = '}' ]; then
+# keep them. Asking again would only say "already set up", and they would be lost. Only a whole
+# document counts: its braces and brackets balance, and the outermost object closes on the last
+# line. Its ids, owner and tokens hold none of those characters, so counting them is enough.
+complete() {
+  awk '{ for (i = 1; i <= length($0); i++) { c = substr($0, i, 1)
+           if (c == "{" || c == "[") d++
+           else if (c == "}" || c == "]") { if (--d < 0) bad = 1; if (d == 0) closed = NR } } }
+       END { exit !(NR > 0 && !bad && d == 0 && closed == NR) }' /work/init.json
+}
+if [ -e /work/attempted ] && grep -q '"token": "' /work/init.json 2>/dev/null && complete; then
   echo "keeping the tokens an earlier try in this pod got"
   exit 0
 fi
@@ -232,7 +251,7 @@ code=$?
 if grep -q 'already set up' /work/init.err; then
   if [ -e /work/was-minting ]; then
     echo "An earlier attempt made the store's first tokens but never saved them, so they are lost." >&2
-    {{- include "seshi.bootstrapRecovery" . | nindent 4 }}
+    {{- include "seshi.bootstrapRecovery" (dict "root" . "lost" "both") | nindent 4 }}
     exit 1
   fi
   echo "the store already has an admin, made outside this release; {{ include "seshi.bootstrapSecretName" . }} is not written"
@@ -308,7 +327,7 @@ echo "saved the first tokens in $secret"
 if [ "$note" = admin-token-lost ]; then
   set_status admin-token-lost || true
   echo "An earlier attempt made the store's first admin token but never saved it; $secret holds only the org key." >&2
-  {{- include "seshi.bootstrapRecovery" . | nindent 2 }}
+  {{- include "seshi.bootstrapRecovery" (dict "root" . "lost" "admin") | nindent 2 }}
   exit 1
 fi
 set_status initialized || exit 1
