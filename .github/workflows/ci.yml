@@ -121,3 +121,22 @@ jobs:
         env:
           STORE: ${{ matrix.store }}
           SEARCH: ${{ matrix.search }}
+
+  # The one check the main branch's ruleset requires, so the jobs above can be renamed or added
+  # without touching the ruleset: it passes when each of them passed or was skipped.
+  checks:
+    if: always()
+    needs: [version, seshi-check, seshi-kind]
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Every job passed
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          for result in $RESULTS; do
+            case "$result" in
+              success | skipped) ;;
+              *) echo "::error::a job ended $result"; exit 1 ;;
+            esac
+          done
