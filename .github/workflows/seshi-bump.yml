@@ -45,47 +45,60 @@ jobs:
           CHART: ${{ steps.bump.outputs.chart }}
           KIND: ${{ steps.bump.outputs.kind }}
         run: |
-          # Each step checks its own state, so a run that failed partway (the push made, the
-          # pull request or the CI dispatch not) is finished by the next one.
+          # Each part checks its own state, so a run that failed partway (the push made, the
+          # pull request, the CI dispatch or the cleanup not) is finished by the next one.
+          remote="https://x-access-token:$GH_TOKEN@github.com/$REPO.git"
           branch="seshi-bump/$SESHI"
           case "$KIND" in minor) type=feat ;; *) type=fix ;; esac
           title="$type(seshi): run seshi $SESHI"
-          if git ls-remote --exit-code "https://github.com/$REPO.git" "refs/heads/$branch" >/dev/null; then
-            echo "$branch exists"
-          else
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git switch -c "$branch"
-            git commit -qam "$title"
-            git push -q "https://x-access-token:$GH_TOKEN@github.com/$REPO.git" "HEAD:refs/heads/$branch"
-            echo "pushed $branch"
-          fi
-          # A pull request for this branch, open or not. One closed without merging was declined:
-          # leave it, and open no other for this release. Only pull requests from this repository
-          # count: --head matches a fork's branch of the same name too.
+          # The pull request for this release, open or not. Only pull requests from this
+          # repository count: --head matches a fork's branch of the same name too. One closed
+          # without merging was declined: propose nothing more for this release.
           gh pr list --repo "$REPO" --head "$branch" --state all --json url,state,isCrossRepository \
             --jq '[.[] | select(.isCrossRepository | not)][0] // empty | "\(.state) \(.url)"' >"$RUNNER_TEMP/pr.txt"
           read -r state url <"$RUNNER_TEMP/pr.txt" || true
           case "${state:-}" in
             OPEN) echo "open: $url" ;;
             "")
+              if git ls-remote --exit-code "$remote" "refs/heads/$branch" >/dev/null; then
+                echo "$branch exists"
+              else
+                git config user.name "github-actions[bot]"
+                git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+                git switch -c "$branch"
+                git commit -qam "$title"
+                git push -q "$remote" "HEAD:refs/heads/$branch"
+                echo "pushed $branch"
+              fi
               cat >"$RUNNER_TEMP/body.md" <<EOF
           Moves the seshi chart to seshi $SESHI ([release notes](https://github.com/dosu-ai/seshi/releases/tag/v$SESHI)): \`appVersion\` $SESHI, chart \`version\` $CHART.
 
           CI runs on this branch through a dispatch of \`ci.yml\`: \`seshi-check\` checks every config the chart renders with the new image, and the kind jobs install it. Before merging, read the release notes for new settings or behavior the chart or its README should follow, and push those changes to this branch.
           EOF
               url="$(gh pr create --repo "$REPO" --base main --head "$branch" --title "$title" --body-file "$RUNNER_TEMP/body.md")"
+              state=OPEN
               echo "opened $url"
               ;;
-            *) echo "$url is $state: nothing to do for seshi $SESHI"; exit 0 ;;
+            *) echo "$url is $state: seshi $SESHI is not proposed again" ;;
           esac
-          if [ "$(gh run list --repo "$REPO" --workflow ci.yml --branch "$branch" --json databaseId --jq length)" = 0 ]; then
+          if [ "$state" = OPEN ] &&
+            [ "$(gh run list --repo "$REPO" --workflow ci.yml --branch "$branch" --json databaseId --jq length)" = 0 ]; then
             gh workflow run ci.yml --repo "$REPO" --ref "$branch"
             echo "dispatched ci.yml on $branch"
           fi
-          # An older seshi-bump pull request from this repository, still open, is superseded.
-          gh pr list --repo "$REPO" --state open --json number,headRefName,isCrossRepository \
-            --jq ".[] | select(.isCrossRepository | not) | select(.headRefName | startswith(\"seshi-bump/\")) | select(.headRefName != \"$branch\") | .number" |
-            while read -r number; do
-              gh pr close "$number" --repo "$REPO" --delete-branch --comment "Superseded by $url."
+          link=""
+          [ "$state" = OPEN ] && link=": $url"
+          # Every older seshi-bump branch in this repository is superseded: close its pull request
+          # if still open, then delete the branch. Keyed on the branches, so a run that closed a
+          # pull request but failed to delete its branch is finished by the next.
+          git ls-remote --heads "$remote" 'refs/heads/seshi-bump/*' | sed 's|.*refs/heads/||' |
+            while read -r old; do
+              [ "$old" = "$branch" ] && continue
+              gh pr list --repo "$REPO" --head "$old" --state open --json number,isCrossRepository \
+                --jq '.[] | select(.isCrossRepository | not) | .number' |
+                while read -r number; do
+                  gh pr close "$number" --repo "$REPO" --comment "Superseded by seshi $SESHI$link."
+                done
+              git push -q "$remote" --delete "$old"
+              echo "deleted $old"
             done
