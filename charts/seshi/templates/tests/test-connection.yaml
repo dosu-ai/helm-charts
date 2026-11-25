@@ -16,6 +16,9 @@ spec:
   imagePullSecrets:
     {{- toYaml . | nindent 4 }}
   {{- end }}
+  {{- with .Values.priorityClassName }}
+  priorityClassName: {{ . | quote }}
+  {{- end }}
   securityContext:
     {{- toYaml .Values.podSecurityContext | nindent 4 }}
   containers:
@@ -26,3 +29,11 @@ spec:
       args: ["healthcheck", "--url", "http://{{ include "seshi.fullname" . }}:{{ .Values.service.port }}/healthz"]
       securityContext:
         {{- toYaml .Values.securityContext | nindent 8 }}
+  {{- with .Values.nodeSelector }}
+  nodeSelector:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- with .Values.tolerations }}
+  tolerations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}

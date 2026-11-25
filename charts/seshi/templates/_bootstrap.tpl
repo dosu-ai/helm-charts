@@ -26,7 +26,8 @@ else EndpointSuffix), else https://<account>.blob.core.windows.net. gs://: the c
 endpoint, else STORAGE_EMULATOR_HOST, else https://storage.googleapis.com. */}}
 {{- define "seshi.bootstrapStore" -}}
 set -u
-seshi config show --set "store.url=$STORE_URL" >/work/config.txt || exit 1
+# Keep config show local: store.* never comes from the bucket's runtime config.
+seshi config show --set server.runtime_config=file --set "store.url=$STORE_URL" >/work/config.txt || exit 1
 has() { grep -q "^store\.$1 = " /work/config.txt; }
 setting() { sed -n "s/^store\.$1 = \"\(.*\)\"\$/\1/p" /work/config.txt; }
 # AZURE_STORAGE_CONNECTION_STRING as seshi reads it: `name=value` parts split on `;`, trimmed,
@@ -134,8 +135,11 @@ kube() {
   else
     set --
   fi
-  status="$(curl -sS -o /work/answer.json -w '%{http_code}' --cacert "$sa/ca.crt" \
-    -H "Authorization: Bearer $(cat "$sa/token")" -X "$method" "$@" "$api/$path")" || status=000
+  # Pass the token on stdin (-K -) so it stays out of /proc/<pid>/cmdline, and bound connect and
+  # request time so a stalled API call returns 000 and retries.
+  status="$(printf 'header = "Authorization: Bearer %s"\n' "$(cat "$sa/token")" |
+    curl -sS --connect-timeout 10 --max-time 30 -K - -o /work/answer.json -w '%{http_code}' \
+      --cacert "$sa/ca.crt" -X "$method" "$@" "$api/$path")" || status=000
   printf '%s' "$status"
 }
 # The bootstrap's note on the Secret in /work/answer.json: "admin-token-lost" or nothing.

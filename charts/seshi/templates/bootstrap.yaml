@@ -32,6 +32,7 @@ metadata:
     helm.sh/hook: post-install
     helm.sh/hook-weight: "-10"
     helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded,hook-failed
+automountServiceAccountToken: false
 ---
 {{- end }}
 # The Role is bound to the Job's service account only while the hook runs: Helm deletes both
@@ -116,6 +117,9 @@ spec:
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . | quote }}
       {{- end }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
