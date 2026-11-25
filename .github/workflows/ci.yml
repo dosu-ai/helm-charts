@@ -10,11 +10,16 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 jobs:
   # A pull request that changes a chart bumps its version (README.md, "Working on a chart").
   version:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -27,12 +32,15 @@ jobs:
         env:
           BASE: ${{ github.event.pull_request.base.sha }}
         run: |
+          chart_version() {
+            bun -e 'const text = await Bun.stdin.text(); if (!text.trim()) process.exit(0); const doc = Bun.YAML.parse(text) as { version?: unknown }; if (doc?.version != null) process.stdout.write(String(doc.version));'
+          }
           status=0
           for chart in charts/*/; do
             chart="${chart%/}"
             git diff --quiet "$BASE" HEAD -- "$chart" && continue
-            new="$(sed -n 's/^version: //p' "$chart/Chart.yaml")"
-            old="$(git show "$BASE:$chart/Chart.yaml" 2>/dev/null | sed -n 's/^version: //p')"
+            new="$(chart_version < "$chart/Chart.yaml")"
+            old="$(git show "$BASE:$chart/Chart.yaml" 2>/dev/null | chart_version)"
             if [ -z "$old" ]; then
               echo "$chart: new chart at $new"
             elif ! bun -e 'process.exit(Bun.semver.order(process.argv[1], process.argv[2]) < 0 ? 0 : 1)' "$old" "$new"; then
@@ -45,13 +53,11 @@ jobs:
           exit "$status"
 
   # Lint and render the seshi chart under both Helm majors, check every config it renders with
-  # its own seshi release, refuse the values it must refuse, and validate the manifests.
+  # its own seshi release, refuse the values it must refuse, and validate the manifests. Both
+  # Helm majors run in one job to reuse the runner, kubeconform binary, and pulled seshi image.
   seshi-check:
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        helm: [v3.22.1, v4.3.2]
+    timeout-minutes: 15
     env:
       KUBECONFORM_VERSION: v0.8.0
       KUBECONFORM_SHA256: 9bc2bffbf71f261128533edaf912153948b7ff238f9a531ae6d34466ec287883
@@ -62,21 +68,32 @@ jobs:
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: 1.4.3
-      - uses: azure/setup-helm@2f5e7bc67f1f9972ab16657bb795f36d8f04de0e # v5.1.0
-        with:
-          version: ${{ matrix.helm }}
       - name: Install kubeconform
         run: |
           curl -fsSLo /tmp/kubeconform.tar.gz \
             "https://github.com/yannh/kubeconform/releases/download/$KUBECONFORM_VERSION/kubeconform-linux-amd64.tar.gz"
           echo "$KUBECONFORM_SHA256  /tmp/kubeconform.tar.gz" | sha256sum -c -
           sudo tar -xzf /tmp/kubeconform.tar.gz -C /usr/local/bin kubeconform
-      - run: bun scripts/seshi-check.ts
+      - uses: azure/setup-helm@2f5e7bc67f1f9972ab16657bb795f36d8f04de0e # v5.1.0
+        with:
+          version: v3.22.1
+      - name: Check seshi chart (Helm v3)
+        run: |
+          helm version --short
+          bun scripts/seshi-check.ts
+      - uses: azure/setup-helm@2f5e7bc67f1f9972ab16657bb795f36d8f04de0e # v5.1.0
+        with:
+          version: v4.3.2
+      - name: Check seshi chart (Helm v4)
+        run: |
+          helm version --short
+          bun scripts/seshi-check.ts
 
   # Install the seshi chart on kind against a bucket in the cluster: bootstrap, upload, search,
   # restart. s3 is RustFS, az Azurite, gs fake-gcs-server (scripts/seshi-e2e.sh).
   seshi-kind:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
