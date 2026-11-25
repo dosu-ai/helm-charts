@@ -15,13 +15,14 @@
  * Needs helm and docker: bun scripts/seshi-check.ts */
 
 import { chmodSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { availableParallelism, tmpdir } from "node:os";
 import { dirname, join, posix } from "node:path";
 
 const ROOT = join(import.meta.dir, "..");
 const CHART = join(ROOT, "charts/seshi");
 const CI_VALUES = join(CHART, "ci");
 const RELEASE = "seshi";
+const CONCURRENCY = Math.min(8, Math.max(2, availableParallelism()));
 
 const S3 = ["--set", "store.url=s3://b/p"];
 
@@ -239,26 +240,59 @@ interface Manifest {
   spec?: PodSpec & { template?: { spec?: PodSpec } };
 }
 
-function run(cmd: string[], stdin?: string) {
-  const proc = Bun.spawnSync(cmd, {
+async function run(cmd: string[], stdin?: string) {
+  const proc = Bun.spawn(cmd, {
     cwd: ROOT,
     stdin: stdin === undefined ? "ignore" : new TextEncoder().encode(stdin),
     stdout: "pipe",
     stderr: "pipe",
   });
-  return {
-    code: proc.exitCode,
-    stdout: proc.stdout.toString(),
-    stderr: proc.stderr.toString(),
-  };
+  const [stdout, stderr, code] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+    proc.exited,
+  ]);
+  return { code, stdout, stderr };
 }
 
-function must(cmd: string[], what: string): string {
-  const result = run(cmd);
+async function must(cmd: string[], what: string): Promise<string> {
+  const result = await run(cmd);
   if (result.code !== 0) {
     throw new Error(`${what} failed (exit ${result.code}):\n${result.stdout}${result.stderr}`);
   }
   return result.stdout;
+}
+
+async function mapLimit<T, R>(
+  items: readonly T[],
+  limit: number,
+  fn: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) {
+      const index = next++;
+      results[index] = await fn(items[index] as T);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return results;
+}
+
+const pulledImages = new Map<string, Promise<void>>();
+
+/** Pulls an image once before parallel containers start, so cold runners do not race on pulls. */
+function ensureImage(image: string): Promise<void> {
+  let pending = pulledImages.get(image);
+  if (pending === undefined) {
+    pending = (async () => {
+      const present = await run(["docker", "image", "inspect", image]);
+      if (present.code !== 0) await must(["docker", "pull", image], `docker pull ${image}`);
+    })();
+    pulledImages.set(image, pending);
+  }
+  return pending;
 }
 
 function manifests(rendered: string): Manifest[] {
@@ -314,7 +348,13 @@ function containerEnv(container: Container): string[] {
   return args;
 }
 
-function seshiRun(image: string, root: string, env: string[], command: string[]): string {
+async function seshiRun(
+  image: string,
+  root: string,
+  env: string[],
+  command: string[],
+): Promise<string> {
+  await ensureImage(image);
   return must(
     [
       "docker",
@@ -341,13 +381,12 @@ function seshiRun(image: string, root: string, env: string[], command: string[])
   );
 }
 
-function checkValues(file: string, scratch: string): string {
+async function checkValues(file: string, scratch: string): Promise<string> {
   const values = join(CI_VALUES, file);
-  must(["helm", "lint", CHART, "-f", values, "--strict"], `helm lint -f ${file}`);
-  const rendered = must(
-    ["helm", "template", RELEASE, CHART, "-f", values],
-    `helm template -f ${file}`,
-  );
+  const [, rendered] = await Promise.all([
+    must(["helm", "lint", CHART, "-f", values, "--strict"], `helm lint -f ${file}`),
+    must(["helm", "template", RELEASE, CHART, "-f", values], `helm template -f ${file}`),
+  ]);
   const docs = manifests(rendered);
 
   for (const doc of docs) {
@@ -387,8 +426,8 @@ function checkValues(file: string, scratch: string): string {
     chmodSync(target, 0o644);
   }
   const env = containerEnv(container);
-  seshiRun(container.image, root, env, ["config", "check", "--config", config]);
-  const shown = JSON.parse(
+  const [, shownRaw] = await Promise.all([
+    seshiRun(container.image, root, env, ["config", "check", "--config", config]),
     seshiRun(container.image, root, env, [
       "config",
       "show",
@@ -397,7 +436,8 @@ function checkValues(file: string, scratch: string): string {
       "--origin",
       "--json",
     ]),
-  ) as { values: { path: string; origin?: { path?: string } }[] };
+  ]);
+  const shown = JSON.parse(shownRaw) as { values: { path: string; origin?: { path?: string } }[] };
   const origins = new Set(shown.values.map((v) => v.origin?.path).filter(Boolean));
   for (const dropIn of dropIns) {
     if (!origins.has(dropIn)) throw new Error(`seshi never read the drop-in ${dropIn}`);
@@ -447,14 +487,14 @@ function checkMounts(doc: Manifest, spec: PodSpec): void {
   }
 }
 
-function checkRefused(): void {
-  for (const refused of REFUSED) {
-    const result = run(["helm", "template", RELEASE, CHART, ...refused.args]);
+async function checkRefused(): Promise<void> {
+  await mapLimit(REFUSED, CONCURRENCY, async (refused) => {
+    const result = await run(["helm", "template", RELEASE, CHART, ...refused.args]);
     if (result.code === 0) throw new Error(`${refused.name}: the chart rendered it`);
     if (!result.stderr.includes(refused.error)) {
       throw new Error(`${refused.name}: expected "${refused.error}" in:\n${result.stderr}`);
     }
-  }
+  });
 }
 
 /** Release names Helm accepts that are easy to get wrong: one YAML reads as a boolean, and one
@@ -463,53 +503,86 @@ const AWKWARD_RELEASES = ["true", "internal-platform-observability-staging-us-we
 
 /** Renders the chart under awkward release names, and with a `$(NAME)` in the store URL, which
  * Kubernetes would expand in args and env unless the chart writes it as `$$(NAME)`. */
-function checkAwkwardInputs(): string[] {
-  const rendered: string[] = [];
+async function checkAwkwardInputs(): Promise<string[]> {
   const values = join(CI_VALUES, "s3-values.yaml");
-  for (const release of AWKWARD_RELEASES) {
-    const out = must(["helm", "template", release, CHART, "-f", values], `release ${release}`);
-    for (const doc of manifests(out)) {
-      const name = doc.metadata?.name ?? "";
-      if (name.length > 63) throw new Error(`release ${release}: ${doc.kind} ${name} is too long`);
-    }
-    rendered.push(out);
-  }
-  const url = "s3://seshi/prod/$(TEAM)";
-  const out = must(
-    ["helm", "template", RELEASE, CHART, "-f", values, "--set", `store.url=${url}`],
-    "$ url",
-  );
-  const docs = manifests(out);
-  const server = podSpec(docs.find((d) => d.kind === "Deployment") ?? {})?.containers[0];
-  if (!server?.args?.includes("store.url=s3://seshi/prod/$$(TEAM)")) {
-    throw new Error(`the server's --set store.url does not escape $: ${server?.args?.join(" ")}`);
-  }
-  const job = podSpec(docs.find((d) => d.kind === "Job") ?? {});
-  for (const container of job?.initContainers ?? []) {
-    const value = container.env?.find((e) => e.name === "STORE_URL")?.value;
-    if (value !== undefined && value !== "s3://seshi/prod/$$(TEAM)") {
-      throw new Error(`the bootstrap's STORE_URL does not escape $: ${value}`);
-    }
-  }
-  // A ServiceAccount name YAML would read as a boolean, made by the chart or not.
-  for (const create of ["true", "false"]) {
-    const args = [...S3, "--set", `serviceAccount.create=${create}`];
-    args.push("--set-string", "serviceAccount.name=true");
-    rendered.push(must(["helm", "template", RELEASE, CHART, ...args], `account true (${create})`));
-  }
-  // Secret keys that YAML would read as numbers: kubeconform checks these render as strings.
-  for (const [url, key] of [
-    ["az://c/p", "accountKey"],
-    ["gs://b/p", "serviceAccountKey"],
-  ]) {
-    const args = ["--set", `store.url=${url}`, "--set", "store.accountName=acct"];
-    args.push("--set-string", "store.credentials.existingSecret=1234");
-    args.push("--set-string", `store.credentials.keys.${key}=1234`);
-    rendered.push(must(["helm", "template", RELEASE, CHART, ...args], `numeric ${key}`));
-  }
-  // YAML boolean/number words in names, claim, class, priorityClassName, and namespace, plus a
-  // redaction pack whose first line starts with spaces (requires explicit YAML block indent).
-  rendered.push(
+  const tasks: Promise<string>[] = [
+    ...AWKWARD_RELEASES.map(async (release) => {
+      const out = await must(
+        ["helm", "template", release, CHART, "-f", values],
+        `release ${release}`,
+      );
+      for (const doc of manifests(out)) {
+        const name = doc.metadata?.name ?? "";
+        if (name.length > 63) {
+          throw new Error(`release ${release}: ${doc.kind} ${name} is too long`);
+        }
+      }
+      return out;
+    }),
+    (async () => {
+      const url = "s3://seshi/prod/$(TEAM)";
+      const out = await must(
+        ["helm", "template", RELEASE, CHART, "-f", values, "--set", `store.url=${url}`],
+        "$ url",
+      );
+      const docs = manifests(out);
+      const server = podSpec(docs.find((d) => d.kind === "Deployment") ?? {})?.containers[0];
+      if (!server?.args?.includes("store.url=s3://seshi/prod/$$(TEAM)")) {
+        throw new Error(
+          `the server's --set store.url does not escape $: ${server?.args?.join(" ")}`,
+        );
+      }
+      const job = podSpec(docs.find((d) => d.kind === "Job") ?? {});
+      for (const container of job?.initContainers ?? []) {
+        const value = container.env?.find((e) => e.name === "STORE_URL")?.value;
+        if (value !== undefined && value !== "s3://seshi/prod/$$(TEAM)") {
+          throw new Error(`the bootstrap's STORE_URL does not escape $: ${value}`);
+        }
+      }
+      return out;
+    })(),
+    // A ServiceAccount name YAML would read as a boolean, made by the chart or not.
+    ...["true", "false"].map((create) =>
+      must(
+        [
+          "helm",
+          "template",
+          RELEASE,
+          CHART,
+          ...S3,
+          "--set",
+          `serviceAccount.create=${create}`,
+          "--set-string",
+          "serviceAccount.name=true",
+        ],
+        `account true (${create})`,
+      ),
+    ),
+    // Secret keys that YAML would read as numbers: kubeconform checks these render as strings.
+    ...[
+      ["az://c/p", "accountKey"],
+      ["gs://b/p", "serviceAccountKey"],
+    ].map(([url, key]) =>
+      must(
+        [
+          "helm",
+          "template",
+          RELEASE,
+          CHART,
+          "--set",
+          `store.url=${url}`,
+          "--set",
+          "store.accountName=acct",
+          "--set-string",
+          "store.credentials.existingSecret=1234",
+          "--set-string",
+          `store.credentials.keys.${key}=1234`,
+        ],
+        `numeric ${key}`,
+      ),
+    ),
+    // YAML boolean/number words in names, claim, class, priorityClassName, and namespace, plus a
+    // redaction pack whose first line starts with spaces (requires explicit YAML block indent).
     must(
       [
         "helm",
@@ -540,8 +613,8 @@ function checkAwkwardInputs(): string[] {
       ],
       "awkward string fields and indented redaction pack",
     ),
-  );
-  return rendered;
+  ];
+  return Promise.all(tasks);
 }
 
 interface Setup {
@@ -630,14 +703,17 @@ const FINGERPRINTS: { name: string; a: Setup; b: Setup; same: boolean }[] = [
 ];
 
 /** Runs the bootstrap's store step, as the chart renders it, in the chart's seshi image. */
-function fingerprint(setup: Setup, scratch: string): string {
+async function fingerprint(setup: Setup, scratch: string): Promise<string> {
   const what = setup.set.join(" ");
   const sets = setup.set.flatMap((v) => ["--set", v]);
-  const docs = manifests(must(["helm", "template", RELEASE, CHART, ...sets], `template ${what}`));
+  const docs = manifests(
+    await must(["helm", "template", RELEASE, CHART, ...sets], `template ${what}`),
+  );
   const config = docs.find((d) => d.kind === "ConfigMap")?.data?.["seshi.toml"];
   const job = podSpec(docs.find((d) => d.kind === "Job") ?? {});
   const store = job?.initContainers?.find((c) => c.name === "store");
   if (config === undefined || store === undefined) throw new Error("no bootstrap store step");
+  await ensureImage(store.image);
   const dir = mkdtempSync(join(scratch, "fingerprint-"));
   chmodSync(dir, 0o755);
   writeFileSync(join(dir, "seshi.toml"), config);
@@ -653,16 +729,26 @@ function fingerprint(setup: Setup, scratch: string): string {
   docker.push("-v", `${dir}:/etc/seshi:ro`);
   for (const [name, value] of Object.entries(env)) docker.push("-e", `${name}=${value}`);
   docker.push("--entrypoint", "/bin/sh", store.image, "-c", store.args?.[0] ?? "");
-  const out = must(docker, `the store step for ${what}`);
+  const out = await must(docker, `the store step for ${what}`);
   const id = /^store ([0-9a-f]{16}):/m.exec(out)?.[1];
   if (id === undefined) throw new Error(`the store step for ${what} printed no fingerprint`);
   return id;
 }
 
-function checkFingerprints(scratch: string): void {
+async function checkFingerprints(scratch: string): Promise<void> {
+  // Deduplicate repeated setups across pairs (such as ACCT) before fanning out.
+  const unique = new Map<string, Setup>();
+  const keyOf = (setup: Setup) => JSON.stringify(setup);
   for (const pair of FINGERPRINTS) {
-    const a = fingerprint(pair.a, scratch);
-    const b = fingerprint(pair.b, scratch);
+    unique.set(keyOf(pair.a), pair.a);
+    unique.set(keyOf(pair.b), pair.b);
+  }
+  const entries = [...unique.entries()];
+  const ids = await mapLimit(entries, CONCURRENCY, ([, setup]) => fingerprint(setup, scratch));
+  const byKey = new Map(entries.map(([key], i) => [key, ids[i] as string]));
+  for (const pair of FINGERPRINTS) {
+    const a = byKey.get(keyOf(pair.a)) as string;
+    const b = byKey.get(keyOf(pair.b)) as string;
     if ((a === b) !== pair.same) {
       const want = pair.same ? "match" : "differ";
       throw new Error(`${pair.name}: fingerprints ${a} and ${b} should ${want}`);
@@ -670,9 +756,9 @@ function checkFingerprints(scratch: string): void {
   }
 }
 
-function kubeconform(rendered: string[]): boolean {
+async function kubeconform(rendered: string[]): Promise<boolean> {
   if (Bun.which("kubeconform") === null) return false;
-  const result = run(["kubeconform", "-strict", "-summary", "-"], rendered.join("\n---\n"));
+  const result = await run(["kubeconform", "-strict", "-summary", "-"], rendered.join("\n---\n"));
   if (result.code !== 0) throw new Error(`kubeconform:\n${result.stdout}${result.stderr}`);
   return true;
 }
@@ -687,20 +773,25 @@ if (import.meta.main) {
   const scratch = mkdtempSync(join(tmpdir(), "seshi-chart-"));
   chmodSync(scratch, 0o755);
   try {
-    const rendered: string[] = [];
-    for (const file of readdirSync(CI_VALUES)
+    const files = readdirSync(CI_VALUES)
       .filter((f) => f.endsWith("-values.yaml"))
-      .sort()) {
-      rendered.push(checkValues(file, scratch));
+      .sort();
+    const [valuesRendered, awkwardRendered] = await Promise.all([
+      mapLimit(files, CONCURRENCY, (file) => checkValues(file, scratch)),
+      checkAwkwardInputs(),
+      checkRefused(),
+      checkFingerprints(scratch),
+    ]);
+    for (const file of files) {
       console.log(`ok ${file}: lint, template, config check, drop-ins read`);
     }
-    checkRefused();
     console.log(`ok refused: ${REFUSED.length} value sets`);
-    rendered.push(...checkAwkwardInputs());
-    checkFingerprints(scratch);
     console.log(`ok store fingerprints: ${FINGERPRINTS.length} pairs`);
     console.log(`ok release names ${AWKWARD_RELEASES.join(", ")}; $ in store.url`);
-    console.log(kubeconform(rendered) ? "ok kubeconform" : "skipped kubeconform: not on PATH");
+    const rendered = [...valuesRendered, ...awkwardRendered];
+    console.log(
+      (await kubeconform(rendered)) ? "ok kubeconform" : "skipped kubeconform: not on PATH",
+    );
   } catch (err) {
     console.error(`seshi-check: ${(err as Error).message}`);
     process.exitCode = 1;
