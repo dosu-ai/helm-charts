@@ -20,6 +20,7 @@ jobs:
   publish:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: write # the tag and the GitHub release
       packages: write # ghcr.io/dosu-ai/charts
@@ -36,33 +37,32 @@ jobs:
           OWNER: ${{ github.repository_owner }}
           ACTOR: ${{ github.actor }}
         run: |
-          registry="oci://ghcr.io/$OWNER/charts"
+          owner="$(printf '%s' "$OWNER" | tr '[:upper:]' '[:lower:]')"
+          registry="oci://ghcr.io/$owner/charts"
           echo "$GH_TOKEN" | helm registry login ghcr.io -u "$ACTOR" --password-stdin
+          chart_field() {
+            sed -n "s/^$1:[[:space:]]*//p" "$2" | head -n 1 |
+              sed -e 's/[[:space:]]*#.*//' -e 's/[[:space:]]*$//' -e 's/^"\(.*\)"$/\1/' -e "s/^'\(.*\)'$/\1/"
+          }
           mkdir -p dist
           for chart in charts/*/; do
             chart="${chart%/}"
-            name="$(sed -n 's/^name: //p' "$chart/Chart.yaml")"
-            version="$(sed -n 's/^version: //p' "$chart/Chart.yaml")"
+            name="$(chart_field name "$chart/Chart.yaml")"
+            version="$(chart_field version "$chart/Chart.yaml")"
             tag="$name-$version"
             helm package "$chart" --destination dist >/dev/null
             package="dist/$name-$version.tgz"
 
-            # The registry: push unless GitHub lists this version's tag on the package. The
-            # package not existing yet (404) means no version of it is published.
-            if tags="$(gh api --paginate "orgs/$OWNER/packages/container/charts%2F$name/versions" \
-              --jq '.[].metadata.container.tags[]' 2>/tmp/packages.err)"; then
-              :
-            elif grep -q 'HTTP 404' /tmp/packages.err; then
-              tags=""
-            else
-              echo "::error::listing $registry/$name: $(cat /tmp/packages.err)"
-              exit 1
-            fi
-            # OCI tags cannot hold "+", so Helm stores 1.0.0+build as 1.0.0_build.
-            if printf '%s\n' "$tags" | grep -Fxq "$(printf '%s' "$version" | tr + _)"; then
+            # The registry: check through Helm using the GHCR login above. GHCR answers 404 when
+            # the tag is missing and 403 denied when the package does not exist yet; on a real
+            # permission error, helm push fails next.
+            if helm show chart "$registry/$name" --version "$version" >/dev/null 2>/tmp/show.err; then
               echo "$registry/$name:$version is published"
-            else
+            elif grep -Eiq 'not found|manifest unknown|404|denied|403' /tmp/show.err; then
               helm push "$package" "$registry"
+            else
+              echo "::error::checking $registry/$name:$version: $(cat /tmp/show.err)"
+              exit 1
             fi
 
             # The tag and the GitHub release, with the package attached and fully uploaded (an
