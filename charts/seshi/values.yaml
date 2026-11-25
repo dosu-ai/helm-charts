@@ -34,7 +34,7 @@ store:
   org: ""
   # The bucket's keys. With neither existingSecret nor accessKeyId, an az:// or gs:// store uses
   # the pod's own identity (AKS workload identity, GKE Workload Identity), set up with
-  # serviceAccount.annotations (README.md, "Buckets and keys"). seshi 0.27.0 has no such path
+  # serviceAccount.annotations (README.md, "Buckets and keys"). seshi (as of 0.29.0) has no such path
   # for s3:// and r2://: they need keys.
   credentials:
     # A Secret you made. When empty and accessKeyId is set, the chart makes one.
@@ -89,19 +89,21 @@ bootstrap:
   resources: {}
 
 # API pods (README.md, "Several API pods"). 1: one pod runs both roles, the API and the worker.
-# More: that many API pods behind the Service, each with its own search index on an emptyDir,
-# and one worker pod beside them. Not with a folder store or persistence.enabled. Pair it with
-# config.server.runtime_config: store, so a change through the admin API reaches every pod.
+# More: that many API pods behind the Service and one worker pod beside them, with /data on an
+# emptyDir. With the SQLite search index (seshi's default) each API pod builds its own there;
+# config.search.backend: lance gives them one index in the bucket, which the worker writes. Not
+# with a folder store or persistence.enabled. Pair it with config.server.runtime_config: store,
+# so a change through the admin API reaches every pod.
 api:
   replicas: 1
   # Only with replicas above 1: how long a stopping API pod keeps serving before seshi gets SIGTERM,
   # while the Service stops sending it requests. 0 turns it off. Must stay under 25 seconds.
   drainSeconds: 5
 
-# /data: the search index, and a file:// store.
+# /data: the SQLite search index, and a file:// store.
 persistence:
-  # false: an emptyDir. A new pod then rebuilds the search index from the bucket, and search
-  # answers 503 index_building until it has. Recommended for production.
+  # false: an emptyDir. A new pod then rebuilds the SQLite search index from the bucket, and
+  # search answers 503 index_building until it has. Recommended for production with one pod.
   enabled: false
   existingClaim: ""
   accessModes: [ReadWriteOnce]

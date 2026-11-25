@@ -130,6 +130,14 @@ const REFUSED: { name: string; args: string[]; error: string }[] = [
     error: "several API pods need a bucket",
   },
   {
+    name: "a shared index for a gs:// store on an emulator",
+    args: [
+      "--set", "store.url=gs://b/p", "--set", "config.search.backend=lance",
+      "--set", "extraEnv[0].name=STORAGE_EMULATOR_HOST", "--set", "extraEnv[0].value=http://gcs:4443",
+    ],
+    error: "LanceDB cannot reach",
+  },
+  {
     name: "a drain longer than the grace period allows",
     args: [...S3, "--set", "api.replicas=2", "--set", "api.drainSeconds=30"],
     error: "drainSeconds",

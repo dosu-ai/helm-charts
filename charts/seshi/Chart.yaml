@@ -3,9 +3,9 @@ name: seshi
 description: The seshi session store server, on Kubernetes.
 type: application
 # The chart's own version: bump it in every change to the chart (CI checks).
-version: 0.1.1
+version: 0.2.0
 # The seshi release the chart runs: the image tag unless image.tag or image.digest says otherwise.
-appVersion: "0.27.0"
+appVersion: "0.29.0"
 kubeVersion: ">=1.25.0-0"
 home: https://github.com/dosu-ai/seshi
 sources:

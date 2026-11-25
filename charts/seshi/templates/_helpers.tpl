@@ -117,11 +117,23 @@ app.kubernetes.io/component: server
 {{- fail "api.replicas: a folder store lives on one pod's claim; several API pods need a bucket" }}
 {{- end }}
 {{- if .Values.persistence.enabled }}
-{{- fail "api.replicas above 1 with persistence.enabled: each API pod keeps its own search index, on an emptyDir; one claim cannot hold them all" }}
+{{- fail "api.replicas above 1 with persistence.enabled: one claim cannot serve several API pods, so each keeps /data on an emptyDir" }}
 {{- end }}
 {{- end }}
 {{- $c := .Values.store.credentials }}
 {{- $scheme := include "seshi.storeScheme" . }}
+{{- /* LanceDB reaches only Google's own Cloud Storage, so a shared index for a gs:// store on
+another endpoint needs a location of its own. seshi's config check does not catch it. */}}
+{{- $search := (.Values.config | default dict).search | default dict }}
+{{- if and (eq $scheme "gs") (eq (toString $search.backend) "lance") (not ($search.lance | default dict).uri) }}
+{{- $emulator := false }}
+{{- range .Values.extraEnv }}
+{{- if eq .name "STORAGE_EMULATOR_HOST" }}{{ $emulator = true }}{{ end }}
+{{- end }}
+{{- if or .Values.store.endpoint $emulator }}
+{{- fail "config.search.backend lance: LanceDB cannot reach a gs:// store on another endpoint (store.endpoint or STORAGE_EMULATOR_HOST); set config.search.lance.uri to another bucket or a folder" }}
+{{- end }}
+{{- end }}
 {{- if and $c.accessKeyId (not $c.existingSecret) (has $scheme (list "az" "gs")) }}
 {{- fail (printf "store.credentials.accessKeyId is for s3:// and r2://: give an %s:// bucket's key in store.credentials.existingSecret (store.credentials.keys says which key)" $scheme) }}
 {{- end }}
@@ -163,8 +175,8 @@ app.kubernetes.io/component: server
 {{- end }}
 {{- end }}
 
-{{/* seshi.toml: the user's config, with the store, the listen address, the index path and the
-chart's packs set by the chart. */}}
+{{/* seshi.toml: the user's config, with the store, the listen address, the SQLite index's path
+and the chart's packs set by the chart. */}}
 {{- define "seshi.toml" -}}
 {{- $config := deepCopy (.Values.config | default dict) }}
 {{- $s := .Values.store }}
@@ -179,7 +191,7 @@ chart's packs set by the chart. */}}
 {{- $_ := set $server "listen" ":7200" }}
 {{- $_ := set $config "server" $server }}
 {{- $search := get $config "search" | default dict }}
-{{- if not (hasKey $search "path") }}
+{{- if and (ne (toString (get $search "backend")) "lance") (not (hasKey $search "path")) }}
 {{- $_ := set $search "path" "/data/search/index.sqlite" }}
 {{- end }}
 {{- $_ := set $config "search" $search }}

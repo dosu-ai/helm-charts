@@ -130,8 +130,9 @@ spec:
         {{- end }}
       volumes:
         {{- include "seshi.configVolume" $root | nindent 8 }}
-        # The search index (each API pod keeps its own), and a folder store. One pod with both
-        # roles may keep it on the claim; several API pods each rebuild theirs from the bucket.
+        # The SQLite search index (each API pod keeps its own), and a folder store. One pod with
+        # both roles may keep it on the claim; several API pods each rebuild theirs from the
+        # bucket, or read the shared LanceDB index there.
         - name: data
           {{- if and $values.persistence.enabled (eq (int .replicas) 1) $server }}
           persistentVolumeClaim:
