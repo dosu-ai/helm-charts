@@ -172,7 +172,8 @@ printf '%s\n' \
   "Make new ones in the server pod and keep them yourself:" \
   "  kubectl -n {{ .Release.Namespace }} exec deploy/{{ include "seshi.fullname" . }} -- seshi admin init --force --json --set $word   # another admin token" \
   "  kubectl -n {{ .Release.Namespace }} exec deploy/{{ include "seshi.fullname" . }} -- seshi admin init --rotate-org-key --json --set $word   # a new org key; members sign in again" \
-  "Then revoke the lost admin token (seshi tokens list, seshi tokens revoke)." >&2
+  "Then revoke the lost admin token (seshi tokens list, seshi tokens revoke), and record that the store has its admin, so a reinstall goes on:" \
+  "  kubectl -n {{ .Release.Namespace }} patch configmap {{ include "seshi.bootstrapStatusName" . }} --type merge -p '{\"data\":{\"status\":\"already-initialized\"}}'" >&2
 {{- end }}
 
 {{/* Step 1, before any token exists: is there anything to do, and is it safe? */}}
@@ -216,6 +217,13 @@ and never handed on. */}}
 {{- define "seshi.bootstrapInit" -}}
 set -u
 [ -e /work/done ] && exit 0
+# A restart after seshi printed the tokens (the container stopped before it could exit 0):
+# keep them. Asking again would only say "already set up", and they would be lost.
+if [ -e /work/attempted ] && grep -q '"token": "' /work/init.json 2>/dev/null &&
+  [ "$(tail -c 2 /work/init.json | tr -d '\n')" = '}' ]; then
+  echo "keeping the tokens an earlier try in this pod got"
+  exit 0
+fi
 [ -e /work/attempted ] && touch /work/was-minting
 touch /work/attempted
 seshi admin init --json --owner "$BOOTSTRAP_OWNER" --set "store.url=$STORE_URL" >/work/init.json 2>/work/init.err

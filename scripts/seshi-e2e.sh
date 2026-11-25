@@ -239,8 +239,11 @@ k -n "$NS" patch configmap "$RELEASE-bootstrap" --type merge -p '{"data":{"statu
 reinstall 60s && fail "the bootstrap succeeded although its tokens were lost"
 job_log admin-init | grep -q "never saved them" || fail "the bootstrap did not explain the lost tokens"
 
-echo "--- reinstall: a store whose admin was made elsewhere is recorded, not an error"
-k -n "$NS" patch configmap "$RELEASE-bootstrap" --type merge -p '{"data":{"status":"initialized"}}' >/dev/null
+echo "--- reinstall: after the printed repair, a store whose admin was made elsewhere is recorded"
+# The log's last command records that the store has its admin; run it as an operator would.
+repair="$(job_log admin-init | grep -o "kubectl -n $NS patch configmap .*")" ||
+  fail "the bootstrap did not print how to record the store's admin"
+eval "k ${repair#kubectl }" >/dev/null || fail "the printed repair failed: $repair"
 reinstall 3m || fail "a reinstall over a store with an admin and no Secret failed"
 [ "$(k -n "$NS" get configmap "$RELEASE-bootstrap" -o jsonpath='{.data.status}')" = already-initialized ] ||
   fail "the bootstrap did not record already-initialized"

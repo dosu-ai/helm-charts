@@ -34,7 +34,8 @@ Members then run `seshi login --server https://seshi.example.com --key <org key>
 ## Values
 
 [`values.yaml`](values.yaml) comments every value, and `values.schema.json` refuses unknown
-keys. The ones most installs set:
+chart keys. What goes under `config` and `dropIns` is seshi's own config, which the schema
+passes through and seshi checks when it starts. The ones most installs set:
 
 | Value | What it sets |
 |---|---|
@@ -48,7 +49,7 @@ keys. The ones most installs set:
 | `bootstrap.*` | The first admin token ([below](#first-tokens)) |
 | `persistence.enabled` | `/data` on a PersistentVolumeClaim instead of an emptyDir ([below](#storage)) |
 | `api.replicas` | Several API pods and one worker pod, in place of one pod with both roles ([below](#several-api-pods)) |
-| `api.drainSeconds` | How long a stopping API pod keeps serving before SIGTERM (5; 0 turns it off) |
+| `api.drainSeconds` | With `api.replicas` above 1, how long a stopping API pod keeps serving before SIGTERM (5; 0 turns it off) |
 | `ingress.*`, `networkPolicy.*`, `resources`, `probes` | The usual Kubernetes settings |
 
 The chart writes `seshi.toml` into a ConfigMap mounted at `/etc/seshi`, and sets
@@ -84,14 +85,14 @@ in the namespace would give the pod `SESHI_SERVICE_HOST`, and seshi would not st
 
 With `bootstrap.enabled` (the default), a post-install Job makes the store's first admin token
 and, when `auth.org_key` is on (the default), the org key, and saves them in the Secret
-`<release>-initial-admin` (`admin-token`, `admin-owner`, `org-key`). Argo CD keeps its initial
+`<fullname>-initial-admin` (`admin-token`, `admin-owner`, `org-key`). Argo CD keeps its initial
 admin password the same way. The Job has four steps:
 
 1. **store** asks seshi which store the config and the pod's environment pick, and takes a
    fingerprint of it. The Secret records it as `seshi.dosu.ai/store`.
 2. **check** reads the Secret. If it already holds this store's tokens, the Job is done. If it
    holds another store's, the Job stops before making any: move the Secret aside, or set
-   `bootstrap.secretName`. Otherwise it records `minting` in the ConfigMap `<release>-bootstrap`.
+   `bootstrap.secretName`. Otherwise it records `minting` in the ConfigMap `<fullname>-bootstrap`.
 3. **admin-init** runs `seshi admin init` against the bucket.
 4. **save** creates the Secret and records `initialized`.
 
@@ -106,7 +107,9 @@ failure, or the Job giving up after its retries) loses them with it; the next ru
 - **An earlier attempt made tokens and lost them.** `seshi admin init` says "already set up"
   after an attempt that never finished: one recorded as `minting`, or one in the same pod. The
   Job fails, and its log gives the commands that make new tokens in the server pod
-  (`seshi admin init --force`, `--rotate-org-key`). When only the admin token was lost, the
+  (`seshi admin init --force`, `--rotate-org-key`), and the one that marks the ConfigMap
+  `already-initialized` so a reinstall does not stop at the same place. When only the admin
+  token was lost, the
   Secret holds the org key, carries `seshi.dosu.ai/bootstrap: admin-token-lost`, and the Job
   refuses it on every later install until you replace it.
 - **Not on upgrade.** The Job runs on `helm install` only. Turning `bootstrap.enabled` on later
@@ -122,7 +125,10 @@ its own instead: workload identity then does not reach it, so give it keys in
 pod. A Role bound to the Job's account while the hook runs may create Secrets and ConfigMaps in
 the namespace, read its Secret, and read and replace its ConfigMap. Only the two curl steps
 mount the Kubernetes API token; the seshi steps never see it. Helm deletes the Role and its
-binding when the Job succeeds or fails, and the Job itself when it succeeds. One case escapes
+binding when the Job succeeds or fails, and the Job itself when it succeeds. Helm also counts
+the Job as failed when `helm install --timeout` runs out first, and deletes the Role then, so
+a Job still retrying cannot save its tokens. Give the install time for image pulls (the default
+5m is usually enough). One case escapes
 that: when the API refuses to create the Job at all (a ResourceQuota on Jobs, an admission
 policy), Helm stops with the Role and binding in place, and the Job's own ServiceAccount when
 it has one. Delete them by hand then, or the next install replaces them:
@@ -130,8 +136,9 @@ it has one. Delete them by hand then, or the next install replaces them:
 ```sh
 kubectl -n seshi delete role,rolebinding,serviceaccount \
   -l app.kubernetes.io/instance=seshi,app.kubernetes.io/component=bootstrap
-``` Under an egress NetworkPolicy, the Job must reach the Kubernetes API
-as well as the bucket. The Secret and the ConfigMap are not part of the release: they outlive
+```
+
+Under an egress NetworkPolicy, the Job must reach the Kubernetes API as well as the bucket. The Secret and the ConfigMap are not part of the release: they outlive
 `helm uninstall`, like the store's admin they belong to. seshi never reads the Secret: copy the
 tokens to a password manager and delete it when you like.
 
