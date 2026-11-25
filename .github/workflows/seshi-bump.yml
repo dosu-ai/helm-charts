@@ -61,9 +61,10 @@ jobs:
             echo "pushed $branch"
           fi
           # A pull request for this branch, open or not. One closed without merging was declined:
-          # leave it, and open no other for this release.
-          gh pr list --repo "$REPO" --head "$branch" --state all --json url,state \
-            --jq '.[0] // empty | "\(.state) \(.url)"' >"$RUNNER_TEMP/pr.txt"
+          # leave it, and open no other for this release. Only pull requests from this repository
+          # count: --head matches a fork's branch of the same name too.
+          gh pr list --repo "$REPO" --head "$branch" --state all --json url,state,isCrossRepository \
+            --jq '[.[] | select(.isCrossRepository | not)][0] // empty | "\(.state) \(.url)"' >"$RUNNER_TEMP/pr.txt"
           read -r state url <"$RUNNER_TEMP/pr.txt" || true
           case "${state:-}" in
             OPEN) echo "open: $url" ;;
@@ -82,9 +83,9 @@ jobs:
             gh workflow run ci.yml --repo "$REPO" --ref "$branch"
             echo "dispatched ci.yml on $branch"
           fi
-          # An older seshi-bump pull request still open is superseded by this one.
-          gh pr list --repo "$REPO" --state open --json number,headRefName \
-            --jq ".[] | select(.headRefName | startswith(\"seshi-bump/\")) | select(.headRefName != \"$branch\") | .number" |
+          # An older seshi-bump pull request from this repository, still open, is superseded.
+          gh pr list --repo "$REPO" --state open --json number,headRefName,isCrossRepository \
+            --jq ".[] | select(.isCrossRepository | not) | select(.headRefName | startswith(\"seshi-bump/\")) | select(.headRefName != \"$branch\") | .number" |
             while read -r number; do
               gh pr close "$number" --repo "$REPO" --delete-branch --comment "Superseded by $url."
             done
