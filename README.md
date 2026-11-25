@@ -26,6 +26,7 @@ kind create cluster --name seshi-chart
 scripts/seshi-e2e.sh              # install against RustFS, bootstrap, upload, search, restart
 STORE=az scripts/seshi-e2e.sh     # the same against Azurite, with the runtime config in the bucket
 STORE=gs scripts/seshi-e2e.sh     # the same against fake-gcs-server
+SEARCH=lance scripts/seshi-e2e.sh # with the shared LanceDB index in the bucket (s3 and az)
 ```
 
 `seshi-check.ts` runs the chart's own seshi release (`ghcr.io/dosu-ai/seshi:<appVersion>`) on

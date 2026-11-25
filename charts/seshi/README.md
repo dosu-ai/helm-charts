@@ -31,6 +31,26 @@ kubectl -n seshi get secret seshi-initial-admin -o jsonpath='{.data.org-key}' | 
 Members then run `seshi login --server https://seshi.example.com --key <org key>` and
 `seshi capture install`.
 
+### Try it on kind
+
+A folder store needs no bucket, so one pod on [kind](https://kind.sigs.k8s.io) runs the whole
+server:
+
+```sh
+kind create cluster --name seshi
+helm install seshi oci://ghcr.io/dosu-ai/charts/seshi -n seshi --create-namespace \
+  --set store.url=file:///data/store --set persistence.enabled=true --wait
+kubectl -n seshi exec deploy/seshi -- seshi admin init --json --set store.url=file:///data/store
+kubectl -n seshi port-forward svc/seshi 7200:7200 &
+curl http://127.0.0.1:7200/healthz
+```
+
+The bootstrap Job does not run for a folder store, so `admin init` makes the first admin token
+and the org key; keep its output. `kind delete cluster --name seshi` removes everything. To try
+the chart against a bucket,
+[`scripts/seshi-e2e.sh`](https://github.com/dosu-ai/helm-charts/blob/main/scripts/seshi-e2e.sh)
+installs it on kind with RustFS, Azurite or fake-gcs-server in the cluster.
+
 ## Values
 
 [`values.yaml`](values.yaml) comments every value, and `values.schema.json` refuses unknown
@@ -55,8 +75,8 @@ passes through and seshi checks when it starts. The ones most installs set:
 The chart writes `seshi.toml` into a ConfigMap mounted at `/etc/seshi`, and sets
 `SESHI_CONFIG=/etc/seshi/seshi.toml`, so `kubectl exec … seshi <command>` finds the config
 without a flag. A change to the config restarts the pod. The chart sets `[store]`,
-`server.listen` (`:7200`) and, unless `config.search.path` says otherwise, `search.path`
-(`/data/search/index.sqlite`). It refuses `config.store`, `config.server.listen` and
+`server.listen` (`:7200`) and, for seshi's default SQLite index unless `config.search.path`
+says otherwise, `search.path` (`/data/search/index.sqlite`). It refuses `config.store`, `config.server.listen` and
 `config.server.roles`, and starts seshi with `--listen :7200`, `--roles` (`api,worker`, or
 per pod with `api.replicas`) and `--set store.url=…`, which win over any `SESHI_*` variable.
 
@@ -163,7 +183,7 @@ scheme. Without a Secret, an Azure or Google Cloud store uses the pod's identity
 
 | `store.url` | From `existingSecret` (`store.credentials.keys` names the keys) | Without a Secret |
 |---|---|---|
-| `s3://`, `r2://` | `access-key-id` and `secret-access-key` as `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`; `keys.sessionToken` adds `AWS_SESSION_TOKEN` | None: seshi 0.27.0 reads only keys, not IRSA or EKS Pod Identity |
+| `s3://`, `r2://` | `access-key-id` and `secret-access-key` as `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`; `keys.sessionToken` adds `AWS_SESSION_TOKEN` | None: seshi reads only keys, not IRSA or EKS Pod Identity (as of 0.29.0) |
 | `az://` with `store.accountName` | `account-key` as `AZURE_STORAGE_KEY`, else `sas-token` as `AZURE_STORAGE_SAS_TOKEN`: whichever the Secret has | AKS workload identity: `azure.workload.identity/client-id` on the ServiceAccount, `azure.workload.identity/use: "true"` in `podLabels`, and **Storage Blob Data Contributor** on the container |
 | `gs://` | `service-account-key.json` mounted as the file `GOOGLE_APPLICATION_CREDENTIALS` names | GKE Workload Identity: `iam.gke.io/gcp-service-account` on the ServiceAccount, with **Storage Object User** on the bucket |
 
@@ -189,11 +209,12 @@ serviceAccount:
 
 ## Storage
 
-Sessions live in the bucket. `/data` holds the search index, and the sessions themselves only
-for a folder store (`file:///data/…`).
+Sessions live in the bucket. `/data` holds the SQLite search index, and the sessions themselves
+only for a folder store (`file:///data/…`). With `config.search.backend: lance` the index is in
+the bucket instead ([below](#a-shared-search-index)), and `/data` holds no index.
 
 - `persistence.enabled: false` (the default) puts `/data` on an emptyDir. Each new pod rebuilds
-  the search index from the bucket's change feed. Until it has caught up, `GET /v1/search` and
+  the SQLite index from the bucket's change feed. Until it has caught up, `GET /v1/search` and
   `GET /v1/changes/all` answer `503 index_building`; uploads and reads are unaffected.
 - `persistence.enabled: true` puts `/data` on a claim (`persistence.size`, `storageClass`,
   `existingClaim`). The index survives restarts. Recommended for a single pod in production,
@@ -280,13 +301,40 @@ config:
     runtime_config: store
 ```
 
-Each API pod keeps its own search index on an emptyDir and builds it from the bucket when it
-starts. Until a pod has caught up, its `GET /v1/search` and `GET /v1/changes/all` answer
-`503 index_building` with `Retry-After`, while the other pods answer normally; `/healthz`
-does not wait for the index, so the new pod takes traffic at once. A session one pod stores is
-searchable on the others within `search.interval`. Because one claim cannot hold an index for
-every pod, the chart refuses `persistence.enabled` with more than one API pod, and a folder
-store, which lives on a claim.
+With seshi's default SQLite index, each API pod keeps its own on an emptyDir and builds it
+from the bucket when it starts. Until a pod has caught up, its `GET /v1/search` and
+`GET /v1/changes/all` answer `503 index_building` with `Retry-After`, while the other pods
+answer normally; `/healthz` does not wait for the index, so the new pod takes traffic at once.
+A session one pod stores is searchable on the others within `search.interval`. Because one
+claim cannot serve every pod, the chart refuses `persistence.enabled` with more than one API
+pod, and a folder store, which lives on a claim.
+
+### A shared search index
+
+With `search.backend: lance` ([search.md](https://github.com/dosu-ai/seshi/blob/main/docs/search.md#a-shared-index-lancedb)),
+seshi keeps one index in the bucket, under `search/<deployment>/`, reached with the store's
+keys. The worker pod writes it and every API pod reads it, so a new API pod answers search at
+once instead of building its own copy. A session is searchable on every pod within
+`search.lance.read_consistency` (5 seconds) of the worker's commit.
+
+```yaml
+api:
+  replicas: 3
+config:
+  server:
+    runtime_config: store
+  search:
+    backend: lance
+```
+
+- **One pod** with both roles may use it too; the index is then in the bucket, not on the claim.
+- **The first build** answers `503 index_building` until the worker has read every feed once.
+  Later rebuilds happen beside the live index.
+- **Deleted text** leaves search results at the worker's next commit, and the index's files at
+  its next scrub (`search.lance.scrub`, a day).
+- **A `gs://` store on another endpoint** (`store.endpoint`, or `STORAGE_EMULATOR_HOST` in
+  `extraEnv`) needs `config.search.lance.uri`, another bucket or a folder: LanceDB reaches only
+  Google's own Cloud Storage. The chart refuses it without one.
 
 Files from the chart reach every pod on each `helm upgrade`, which restarts them. A change made
 through the admin API is the one that needs `runtime_config: store`: without it the admin

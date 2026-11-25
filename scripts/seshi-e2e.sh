@@ -12,6 +12,9 @@
 #                runtime config in the bucket, which must reach both API pods and outlive them
 #   gs           fake-gcs-server, ci/kind-gs-values.yaml; also the mounted service account key
 #
+# SEARCH picks the search index: sqlite (default), each API pod's own; or lance, one index in
+# the bucket that the worker writes (s3 and az only: LanceDB cannot reach a GCS emulator).
+#
 # Needs kubectl, helm, bun, curl, and for s3 aws (the AWS CLI). It works only in the kind
 # cluster it names (CONTEXT, kind-seshi-chart by default), never in whatever context happens to
 # be current:
@@ -25,6 +28,13 @@ case "$STORE" in
   gs) VALUES=kind-gs-values.yaml ;;
   *) echo "seshi-e2e: STORE must be s3, az or gs, not $STORE" >&2; exit 2 ;;
 esac
+SEARCH="${SEARCH:-sqlite}"
+case "$SEARCH:$STORE" in
+  sqlite:*) SET=() ;;
+  lance:s3 | lance:az) SET=(--set config.search.backend=lance) ;;
+  lance:gs) echo "seshi-e2e: SEARCH=lance needs a real Google bucket, not fake-gcs-server" >&2; exit 2 ;;
+  *) echo "seshi-e2e: SEARCH must be sqlite or lance, not $SEARCH" >&2; exit 2 ;;
+esac
 
 CONTEXT="${CONTEXT:-kind-seshi-chart}"
 case "$CONTEXT" in
@@ -37,8 +47,8 @@ k() { kubectl --context "$CONTEXT" "$@"; }
 h() { helm --kube-context "$CONTEXT" "$@"; }
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-# A namespace for each store, so the three can run one after another in one cluster.
-NS="${NS:-seshi-$STORE}"
+# A namespace for each store and index, so the runs can follow one another in one cluster.
+NS="${NS:-seshi-$STORE${SET[*]:+-lance}}"
 RELEASE=seshi # on purpose: a Service named seshi is what service links would turn into SESHI_*
 WORK="$(mktemp -d)"
 PIDS=()
@@ -106,7 +116,7 @@ esac
 
 echo "--- install"
 h install "$RELEASE" "$ROOT/charts/seshi" -n "$NS" \
-  -f "$ROOT/charts/seshi/ci/$VALUES" --wait --timeout 5m ||
+  -f "$ROOT/charts/seshi/ci/$VALUES" ${SET[@]+"${SET[@]}"} --wait --timeout 5m ||
   fail "h install did not become ready"
 h test "$RELEASE" -n "$NS" || fail "h test failed"
 
@@ -150,6 +160,13 @@ grep -q '"state": "running"' "$WORK/workers.json" || fail "the worker is not run
 if [ "$STORE" = az ]; then
   # The heartbeat names the instance that writes it: the worker pod, not an API pod.
   grep -q "\"$RELEASE-worker-" "$WORK/workers.json" || fail "the worker pod does not run the worker"
+fi
+
+if [ "$SEARCH" = lance ]; then
+  echo "--- the shared search index"
+  k -n "$NS" exec "deploy/$RELEASE" -- seshi search --status --json >"$WORK/search.json" ||
+    fail "seshi search --status failed"
+  grep -q '"backend": *"lance"' "$WORK/search.json" || fail "the server does not use the LanceDB index: $(cat "$WORK/search.json")"
 fi
 
 echo "--- upload, read back, search"
@@ -208,7 +225,7 @@ created="$(k -n "$NS" get secret "$secret" -o jsonpath='{.metadata.creationTimes
 reinstall() { # reinstall <timeout>: uninstall, then install again; the exit status of the install
   h uninstall "$RELEASE" -n "$NS" --wait >/dev/null
   h install "$RELEASE" "$ROOT/charts/seshi" -n "$NS" \
-    -f "$ROOT/charts/seshi/ci/$VALUES" "${@:2}" --wait --timeout "$1" >/dev/null 2>&1
+    -f "$ROOT/charts/seshi/ci/$VALUES" ${SET[@]+"${SET[@]}"} "${@:2}" --wait --timeout "$1" >/dev/null 2>&1
 }
 reinstall 3m || fail "a reinstall with the store's own Secret failed"
 [ "$(k -n "$NS" get secret "$secret" -o jsonpath='{.metadata.creationTimestamp}')" = "$created" ] ||
