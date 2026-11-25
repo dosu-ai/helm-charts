@@ -32,3 +32,11 @@ SEARCH=lance scripts/seshi-e2e.sh # with the shared LanceDB index in the bucket 
 `seshi-check.ts` runs the chart's own seshi release (`ghcr.io/dosu-ai/seshi:<appVersion>`) on
 every config the chart renders, laid out the way the pod sees it. To move the chart to a new
 seshi release, change `appVersion`, bump `version`, and run both.
+
+`seshi-bump.yml` does the first two by itself. Every 6 hours (or from the Actions tab) it
+compares `appVersion` with the newest `x.y.z` image of `ghcr.io/dosu-ai/seshi`. When the image
+is newer, it opens a pull request that sets `appVersion` to it and bumps `version` the same
+way (a minor for a new seshi minor, else a patch), runs CI on it, and closes an older such
+pull request. Read the seshi release notes before merging it: a new setting may need a change
+to the chart or its README, pushed to the same branch. It needs the repository setting that
+lets GitHub Actions create pull requests.

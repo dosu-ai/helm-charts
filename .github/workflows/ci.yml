@@ -4,6 +4,9 @@ on:
   push:
     branches: [main]
   pull_request:
+  # seshi-bump.yml dispatches it on the branches it opens pull requests from, since a push with
+  # GITHUB_TOKEN starts no pull_request run.
+  workflow_dispatch:
 
 # Read the repository and nothing more. Actions are pinned to commit SHAs, the release in the
 # comment; Dependabot (.github/dependabot.yml) proposes the updates.
@@ -16,8 +19,9 @@ concurrency:
 
 jobs:
   # A pull request that changes a chart bumps its version (README.md, "Working on a chart").
+  # A dispatched run compares its branch with main.
   version:
-    if: github.event_name == 'pull_request'
+    if: github.event_name != 'push'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -32,6 +36,7 @@ jobs:
         env:
           BASE: ${{ github.event.pull_request.base.sha }}
         run: |
+          [ -n "$BASE" ] || BASE="$(git merge-base origin/main HEAD)"
           chart_version() {
             bun -e 'const text = await Bun.stdin.text(); if (!text.trim()) process.exit(0); const doc = Bun.YAML.parse(text) as { version?: unknown }; if (doc?.version != null) process.stdout.write(String(doc.version));'
           }
