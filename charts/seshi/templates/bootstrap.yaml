@@ -39,7 +39,7 @@ metadata:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: {{ $name }}
+  name: {{ $name | quote }}
   labels:
     {{- include "seshi.releaseLabels" . | nindent 4 }}
     app.kubernetes.io/component: bootstrap
@@ -67,7 +67,7 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: {{ $name }}
+  name: {{ $name | quote }}
   labels:
     {{- include "seshi.releaseLabels" . | nindent 4 }}
     app.kubernetes.io/component: bootstrap
@@ -78,16 +78,16 @@ metadata:
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
-  name: {{ $name }}
+  name: {{ $name | quote }}
 subjects:
   - kind: ServiceAccount
     name: {{ $serviceAccount | quote }}
-    namespace: {{ .Release.Namespace }}
+    namespace: {{ .Release.Namespace | quote }}
 ---
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: {{ $name }}
+  name: {{ $name | quote }}
   labels:
     {{- include "seshi.releaseLabels" . | nindent 4 }}
     app.kubernetes.io/component: bootstrap
@@ -121,7 +121,7 @@ spec:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
       initContainers:
         - name: store
-          image: {{ include "seshi.image" . }}
+          image: {{ include "seshi.image" . | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           command: ["/bin/sh", "-c"]
           args:
@@ -174,7 +174,7 @@ spec:
               mountPath: /var/run/secrets/kubernetes.io/serviceaccount
               readOnly: true
         - name: admin-init
-          image: {{ include "seshi.image" . }}
+          image: {{ include "seshi.image" . | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           command: ["/bin/sh", "-c"]
           args:

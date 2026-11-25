@@ -1,7 +1,7 @@
 apiVersion: v1
 kind: Pod
 metadata:
-  name: {{ include "seshi.suffixed" (dict "root" . "suffix" "test") }}
+  name: {{ include "seshi.suffixed" (dict "root" . "suffix" "test") | quote }}
   labels:
     {{- include "seshi.releaseLabels" . | nindent 4 }}
     app.kubernetes.io/component: test
@@ -20,7 +20,7 @@ spec:
     {{- toYaml .Values.podSecurityContext | nindent 4 }}
   containers:
     - name: healthcheck
-      image: {{ include "seshi.image" . }}
+      image: {{ include "seshi.image" . | quote }}
       imagePullPolicy: {{ .Values.image.pullPolicy }}
       # The image has no curl: seshi asks /healthz itself.
       args: ["healthcheck", "--url", "http://{{ include "seshi.fullname" . }}:{{ .Values.service.port }}/healthz"]

@@ -2,7 +2,7 @@
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: {{ include "seshi.suffixed" (dict "root" . "suffix" "data") }}
+  name: {{ include "seshi.suffixed" (dict "root" . "suffix" "data") | quote }}
   labels:
     {{- include "seshi.labels" . | nindent 4 }}
   annotations:

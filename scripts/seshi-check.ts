@@ -453,6 +453,40 @@ function checkAwkwardInputs(): string[] {
     args.push("--set-string", `store.credentials.keys.${key}=1234`);
     rendered.push(must(["helm", "template", RELEASE, CHART, ...args], `numeric ${key}`));
   }
+  // YAML boolean/number words in names, claim, class, priorityClassName, and namespace, plus a
+  // redaction pack whose first line starts with spaces (requires explicit YAML block indent).
+  rendered.push(
+    must(
+      [
+        "helm",
+        "template",
+        RELEASE,
+        CHART,
+        "-n",
+        "true",
+        ...S3,
+        "--set-string",
+        "fullnameOverride=true",
+        "--set",
+        "persistence.enabled=true",
+        "--set-string",
+        "persistence.existingClaim=1234",
+        "--set-string",
+        "priorityClassName=1234",
+        "--set",
+        "ingress.enabled=true",
+        "--set-string",
+        "ingress.className=true",
+        "--set-json",
+        'ingress.hosts=[{"host":"seshi.example.com","paths":[{"path":"/"}]}]',
+        "--set",
+        "networkPolicy.enabled=true",
+        "--set-json",
+        'redactionPacks={"indented.toml":"  # leading spaces on line 1\\nid = \\"acme\\"\\n"}',
+      ],
+      "awkward string fields and indented redaction pack",
+    ),
+  );
   return rendered;
 }
 

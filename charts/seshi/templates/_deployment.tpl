@@ -9,7 +9,7 @@ the background jobs only and answers /healthz. */}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ if $server }}{{ include "seshi.fullname" $root }}{{ else }}{{ include "seshi.suffixed" (dict "root" $root "suffix" "worker") }}{{ end }}
+  name: {{ if $server }}{{ include "seshi.fullname" $root | quote }}{{ else }}{{ include "seshi.suffixed" (dict "root" $root "suffix" "worker") | quote }}{{ end }}
   labels:
     {{- include "seshi.releaseLabels" $root | nindent 4 }}
     app.kubernetes.io/component: {{ .component }}
@@ -61,7 +61,7 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       {{- with $values.priorityClassName }}
-      priorityClassName: {{ . }}
+      priorityClassName: {{ . | quote }}
       {{- end }}
       securityContext:
         {{- toYaml $values.podSecurityContext | nindent 8 }}
@@ -69,7 +69,7 @@ spec:
       terminationGracePeriodSeconds: 30
       containers:
         - name: seshi
-          image: {{ include "seshi.image" $root }}
+          image: {{ include "seshi.image" $root | quote }}
           imagePullPolicy: {{ $values.image.pullPolicy }}
           # Flags win over any SESHI_* in extraEnv or envFrom: the Service, the probes and the
           # one-worker rule depend on the first two, and the chart's checks on the store.
@@ -78,7 +78,7 @@ spec:
             - --listen
             - ":7200"
             - --roles
-            - {{ .roles }}
+            - {{ .roles | quote }}
             - --set
             # Kubernetes expands $(NAME) in args; $$ keeps a $ in the URL as seshi.toml has it.
             - {{ printf "store.url=%s" $values.store.url | replace "$" "$$" | quote }}
@@ -127,7 +127,7 @@ spec:
         - name: data
           {{- if and $values.persistence.enabled (eq (int .replicas) 1) $server }}
           persistentVolumeClaim:
-            claimName: {{ include "seshi.dataClaimName" $root }}
+            claimName: {{ include "seshi.dataClaimName" $root | quote }}
           {{- else }}
           emptyDir: {}
           {{- end }}

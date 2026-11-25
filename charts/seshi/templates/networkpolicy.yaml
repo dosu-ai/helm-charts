@@ -2,7 +2,7 @@
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: {{ include "seshi.fullname" . }}
+  name: {{ include "seshi.fullname" . | quote }}
   labels:
     {{- include "seshi.labels" . | nindent 4 }}
 spec:
