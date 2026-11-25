@@ -99,6 +99,14 @@ spec:
             {{- toYaml (mergeOverwrite (dict "httpGet" (dict "path" "/healthz" "port" "http") "periodSeconds" 10 "failureThreshold" 3) (deepCopy $values.probes.liveness)) | nindent 12 }}
           readinessProbe:
             {{- toYaml (mergeOverwrite (dict "httpGet" (dict "path" "/healthz" "port" "http") "periodSeconds" 5 "failureThreshold" 3) (deepCopy $values.probes.readiness)) | nindent 12 }}
+          {{- if and (not $worker) (gt (int $values.api.drainSeconds) 0) }}
+          # seshi closes its listener on SIGTERM, while the Service and kube-proxy may still send
+          # it requests for a moment. The pod keeps serving for drainSeconds first.
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sleep", {{ int $values.api.drainSeconds | toString | quote }}]
+          {{- end }}
           securityContext:
             {{- toYaml $values.securityContext | nindent 12 }}
           {{- with $values.resources }}

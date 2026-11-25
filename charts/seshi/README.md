@@ -48,6 +48,7 @@ keys. The ones most installs set:
 | `bootstrap.*` | The first admin token ([below](#first-tokens)) |
 | `persistence.enabled` | `/data` on a PersistentVolumeClaim instead of an emptyDir ([below](#storage)) |
 | `api.replicas` | Several API pods and one worker pod, in place of one pod with both roles ([below](#several-api-pods)) |
+| `api.drainSeconds` | How long a stopping API pod keeps serving before SIGTERM (5; 0 turns it off) |
 | `ingress.*`, `networkPolicy.*`, `resources`, `probes` | The usual Kubernetes settings |
 
 The chart writes `seshi.toml` into a ConfigMap mounted at `/etc/seshi`, and sets
@@ -256,7 +257,9 @@ checkpoints and deduplication tolerate a second worker for that long.
 
 - **API pods.** `deploy/<fullname>` runs that many pods with `--roles api` behind the Service,
   and upgrades them one at a time (`RollingUpdate`, `maxUnavailable: 0`). They share nothing
-  but the bucket.
+  but the bucket. A stopping API pod keeps serving for `api.drainSeconds` (5) before seshi gets
+  SIGTERM, because seshi closes its listener at once and the Service can still route to the pod
+  for a moment.
 - **One worker pod.** `deploy/<fullname>-worker` runs `--roles worker` (the pollers, the span
   assembler, retention, the sweep and the heartbeat) with `Recreate`, because seshi wants
   exactly one worker. It serves only `/healthz`, and the Service does not select it.

@@ -115,7 +115,8 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "replicas": { "type": "integer", "minimum": 1 }
+        "replicas": { "type": "integer", "minimum": 1 },
+        "drainSeconds": { "type": "integer", "minimum": 0, "maximum": 25 }
       }
     },
     "persistence": { "$ref": "#/definitions/claim" },

@@ -130,6 +130,11 @@ const REFUSED: { name: string; args: string[]; error: string }[] = [
     error: "several API pods need a bucket",
   },
   {
+    name: "a drain longer than the grace period allows",
+    args: [...S3, "--set", "api.replicas=2", "--set", "api.drainSeconds=30"],
+    error: "drainSeconds",
+  },
+  {
     name: "an ingress with no hosts",
     args: [...S3, "--set", "ingress.enabled=true"],
     error: "ingress.hosts",

@@ -94,6 +94,9 @@ bootstrap:
 # config.server.runtime_config: store, so a change through the admin API reaches every pod.
 api:
   replicas: 1
+  # With several API pods: how long a stopping API pod keeps serving before seshi gets SIGTERM,
+  # while the Service stops sending it requests. 0 turns it off. Must stay under 25 seconds.
+  drainSeconds: 5
 
 # /data: the search index, and a file:// store.
 persistence:
