@@ -125,11 +125,26 @@ app.kubernetes.io/component: server
 {{- if and $c.accessKeyId (not $c.existingSecret) (has $scheme (list "az" "gs")) }}
 {{- fail (printf "store.credentials.accessKeyId is for s3:// and r2://: give an %s:// bucket's key in store.credentials.existingSecret (store.credentials.keys says which key)" $scheme) }}
 {{- end }}
+{{- if and $c.accessKeyId (not $c.existingSecret) (eq $scheme "file") }}
+{{- fail "store.credentials.accessKeyId is for s3:// and r2://: a folder store takes no bucket keys" }}
+{{- end }}
+{{- if and $c.secretAccessKey (not $c.accessKeyId) (not $c.existingSecret) }}
+{{- fail "store.credentials.accessKeyId is required with store.credentials.secretAccessKey" }}
+{{- end }}
+{{- if and $c.existingSecret (eq $scheme "az") (not $c.keys.accountKey) (not $c.keys.sasToken) }}
+{{- fail "store.credentials.keys.accountKey and sasToken are both empty: name at least one key in store.credentials.existingSecret for the az:// bucket" }}
+{{- end }}
 {{- if and $c.existingSecret (eq $scheme "gs") (not $c.keys.serviceAccountKey) }}
 {{- fail "store.credentials.keys.serviceAccountKey is empty: name the key in store.credentials.existingSecret that holds the gs:// bucket's service account key" }}
 {{- end }}
 {{- if and $c.accessKeyId (not $c.existingSecret) $c.keys.sessionToken }}
 {{- fail "store.credentials.keys.sessionToken names a key in your own Secret: with temporary credentials, use store.credentials.existingSecret" }}
+{{- end }}
+{{- $podLabels := .Values.podLabels | default dict }}
+{{- range $label := list "app.kubernetes.io/name" "app.kubernetes.io/instance" "app.kubernetes.io/component" }}
+{{- if hasKey $podLabels $label }}
+{{- fail (printf "podLabels cannot override the chart's selector label %s" $label) }}
+{{- end }}
 {{- end }}
 {{- if .Values.ingress.enabled }}
 {{- if not .Values.ingress.hosts }}

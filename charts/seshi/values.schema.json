@@ -97,7 +97,11 @@
       "additionalProperties": false,
       "properties": {
         "enabled": { "type": "boolean" },
-        "secretName": { "type": "string" },
+        "secretName": {
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^$|^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$"
+        },
         "owner": {
           "description": "A person's owner id, as seshi admin init --owner takes it.",
           "type": "string",
@@ -140,6 +144,7 @@
           "type": "array",
           "items": {
             "type": "object",
+            "additionalProperties": false,
             "required": ["paths"],
             "properties": {
               "host": { "type": "string" },
@@ -148,6 +153,7 @@
                 "minItems": 1,
                 "items": {
                   "type": "object",
+                  "additionalProperties": false,
                   "required": ["path"],
                   "properties": {
                     "path": { "type": "string" },

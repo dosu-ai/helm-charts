@@ -153,6 +153,60 @@ const REFUSED: { name: string; args: string[]; error: string }[] = [
     args: [...S3, "--set-json", 'dropIns={"a.b":{}}'],
     error: "a.b",
   },
+  {
+    name: "inline secretAccessKey without accessKeyId",
+    args: [...S3, "--set", "store.credentials.secretAccessKey=only-secret"],
+    error: "accessKeyId is required",
+  },
+  {
+    name: "inline keys for a folder store",
+    args: [
+      "--set",
+      "store.url=file:///data/store",
+      "--set",
+      "persistence.enabled=true",
+      "--set",
+      "store.credentials.accessKeyId=a",
+      "--set",
+      "store.credentials.secretAccessKey=b",
+    ],
+    error: "a folder store takes no bucket keys",
+  },
+  {
+    name: "an az:// Secret with both key names empty",
+    args: [
+      "--set",
+      "store.url=az://c/p",
+      "--set",
+      "store.credentials.existingSecret=s",
+      "--set-string",
+      "store.credentials.keys.accountKey=",
+      "--set-string",
+      "store.credentials.keys.sasToken=",
+    ],
+    error: "accountKey and sasToken are both empty",
+  },
+  {
+    name: "podLabels overriding a chart selector label",
+    args: [...S3, "--set-json", 'podLabels={"app.kubernetes.io/component":"other"}'],
+    error: "podLabels cannot override",
+  },
+  {
+    name: "an invalid bootstrap.secretName",
+    args: [...S3, "--set", "bootstrap.secretName=Bad_Name"],
+    error: "Bad_Name",
+  },
+  {
+    name: "an unknown key in ingress.hosts",
+    args: [
+      ...S3,
+      "--set",
+      "ingress.enabled=true",
+      "--set-json",
+      'ingress.hosts=[{"host":"a.b","paths":[{"path":"/","pathtype":"Prefix"}]}]',
+    ],
+    error: "pathtype",
+  },
 ];
 
 interface EnvVar {
