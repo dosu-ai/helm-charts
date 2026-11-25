@@ -1,0 +1,186 @@
+# Values for the seshi chart. README.md explains each part; seshi's docs/config.md has every
+# seshi setting (https://github.com/dosu-ai/seshi/blob/main/docs/config.md).
+
+nameOverride: ""
+fullnameOverride: ""
+
+image:
+  repository: ghcr.io/dosu-ai/seshi
+  # Defaults to the chart's appVersion, the seshi release the chart was cut with.
+  tag: ""
+  # sha256:…; wins over the tag.
+  digest: ""
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+# Where sessions go: [store] in seshi.toml.
+store:
+  # Required. s3://bucket/prefix, r2://bucket/prefix, az://container/prefix (Azure Blob
+  # Storage), gs://bucket/prefix (Google Cloud Storage), or file:///data/store (only with
+  # persistence.enabled: a file store on an emptyDir is lost with the pod).
+  url: ""
+  # The AWS region, for s3://.
+  region: ""
+  # An S3-compatible endpoint (RustFS, MinIO, Backblaze, …). For az://, the blob endpoint when
+  # it is not https://<account>.blob.core.windows.net; for gs://, the JSON API root when it is
+  # not https://storage.googleapis.com.
+  endpoint: ""
+  # The Cloudflare account, for r2://.
+  accountId: ""
+  # The Azure storage account, for az://.
+  accountName: ""
+  # This deployment's id, recorded in the bucket; seshi refuses a bucket marked for another.
+  deploymentId: ""
+  org: ""
+  # The bucket's keys. With neither existingSecret nor accessKeyId, an az:// or gs:// store uses
+  # the pod's own identity (AKS workload identity, GKE Workload Identity), set up with
+  # serviceAccount.annotations (README.md, "Buckets and keys"). seshi 0.27.0 has no such path
+  # for s3:// and r2://: they need keys.
+  credentials:
+    # A Secret you made. When empty and accessKeyId is set, the chart makes one.
+    existingSecret: ""
+    # The keys in it. seshi is given the ones for its URL's scheme.
+    keys:
+      # s3:// and r2://: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY and, when named,
+      # AWS_SESSION_TOKEN (for temporary credentials).
+      accessKeyId: access-key-id
+      secretAccessKey: secret-access-key
+      sessionToken: ""
+      # az://: AZURE_STORAGE_KEY and AZURE_STORAGE_SAS_TOKEN, from whichever of the two keys the
+      # Secret has (the account key wins).
+      accountKey: account-key
+      sasToken: sas-token
+      # gs://: a service account's JSON key, mounted as the file GOOGLE_APPLICATION_CREDENTIALS
+      # names.
+      serviceAccountKey: service-account-key.json
+    # Inline keys for s3:// and r2://, for trials. Prefer existingSecret.
+    accessKeyId: ""
+    secretAccessKey: ""
+
+# The rest of seshi.toml, as YAML: auth, default_visibility, filter, limits, records, redaction,
+# review, sources, search, worker, capture. The chart sets [store], server.listen and (unless
+# given here) search.path itself. Secrets belong in Secrets: reference them as
+# { env = "NAME" } with extraEnv, or { file = "/path" } with extraVolumes.
+config: {}
+
+# Drop-ins, rendered to seshi.d/<name>.toml beside seshi.toml. A drop-in may add sources,
+# redaction.packs, capture.exclude and capture.redact_tool_calls (docs/config.md). Names are
+# lower-case letters, digits and dashes; they load in name order.
+dropIns: {}
+
+# Redaction rule packs (docs/redaction.md): file name -> contents. Each is mounted under
+# /etc/seshi/packs/ and added to redaction.packs.
+redactionPacks: {}
+
+# The first admin token and the org key, made for you after the first install and kept in the
+# Secret <release>-initial-admin, the way Argo CD keeps its initial admin password (README.md,
+# "First tokens"). A post-install Job runs `seshi admin init` against the bucket and saves the
+# Secret through the Kubernetes API, so it gets a Role that may create Secrets and ConfigMaps in
+# the namespace. It runs on install only, and not for a folder store (run `seshi admin init` in
+# the server pod then). false: run it yourself.
+bootstrap:
+  enabled: true
+  # Defaults to <fullname>-initial-admin.
+  secretName: ""
+  # The admin token's owner (`seshi admin init --owner`): a person's owner id.
+  owner: admin
+  # Talks to the Kubernetes API: any image with sh, curl, sed, grep and base64.
+  curlImage: curlimages/curl:8.17.0@sha256:935d9100e9ba842cdb060de42472c7ca90cfe9a7c96e4dacb55e79e560b3ff40
+  resources: {}
+
+# API pods (README.md, "Several API pods"). 1: one pod runs both roles, the API and the worker.
+# More: that many API pods behind the Service, each with its own search index on an emptyDir,
+# and one worker pod beside them. Not with a folder store or persistence.enabled. Pair it with
+# config.server.runtime_config: store, so a change through the admin API reaches every pod.
+api:
+  replicas: 1
+  # With several API pods: how long a stopping API pod keeps serving before seshi gets SIGTERM,
+  # while the Service stops sending it requests. 0 turns it off. Must stay under 25 seconds.
+  drainSeconds: 5
+
+# /data: the search index, and a file:// store.
+persistence:
+  # false: an emptyDir. A new pod then rebuilds the search index from the bucket, and search
+  # answers 503 index_building until it has. Recommended for production.
+  enabled: false
+  existingClaim: ""
+  accessModes: [ReadWriteOnce]
+  storageClass: ""
+  size: 10Gi
+
+# More environment for the seshi container (and the bootstrap Job's seshi steps). A SESHI_* name must be a real setting: seshi
+# refuses to start on one it does not know.
+extraEnv: []
+envFrom: []
+extraVolumes: []
+extraVolumeMounts: []
+extraContainers: []
+
+service:
+  type: ClusterIP
+  port: 7200
+  annotations: {}
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  # - host: seshi.example.com
+  #   paths:
+  #     - path: /
+  #       pathType: Prefix
+  hosts: []
+  tls: []
+
+serviceAccount:
+  create: true
+  # Defaults to the release's full name.
+  name: ""
+  # Workload identity goes here: iam.gke.io/gcp-service-account (GKE) or
+  # azure.workload.identity/client-id (AKS). The bootstrap Job runs as this service account too
+  # when the chart makes it (create: true), so `seshi admin init` reaches the bucket the same way.
+  annotations: {}
+
+networkPolicy:
+  # Admit traffic to the API port only from these peers (NetworkPolicyPeer list), and from the
+  # release's own `helm test` pod. Empty: from pods in the release's namespace. Egress is left
+  # alone: seshi reaches its bucket and sources.
+  enabled: false
+  ingressFrom: []
+
+podSecurityContext:
+  runAsNonRoot: true
+  # The image's seshi user and group.
+  runAsUser: 1000
+  runAsGroup: 999
+  fsGroup: 999
+  fsGroupChangePolicy: OnRootMismatch
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: [ALL]
+
+# A starting point, not a measurement: peak memory follows limits.max_upload_bytes.
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+
+# Overrides for the probes' timings, merged over the chart's.
+probes:
+  startup: {}
+  liveness: {}
+  readiness: {}
+
+podAnnotations: {}
+# Also on the bootstrap Job's pod, so a label workload identity needs (AKS:
+# azure.workload.identity/use: "true") reaches `seshi admin init` too.
+podLabels: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}
+priorityClassName: ""

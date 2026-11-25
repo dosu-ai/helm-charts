@@ -1,0 +1,95 @@
+name: release
+
+# Publishes each chart version: the package at oci://ghcr.io/dosu-ai/charts/<chart>, a tag
+# <chart>-<version>, and a GitHub release with the package attached. Each part is checked on
+# its own, so a run that failed halfway is finished by the next one. Only main publishes.
+on:
+  push:
+    branches: [main]
+    paths: ["charts/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write # the tag and the GitHub release
+      packages: write # ghcr.io/dosu-ai/charts
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: azure/setup-helm@2f5e7bc67f1f9972ab16657bb795f36d8f04de0e # v5.1.0
+        with:
+          version: v4.3.2
+      - name: Publish new chart versions
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OWNER: ${{ github.repository_owner }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          owner="$(printf '%s' "$OWNER" | tr '[:upper:]' '[:lower:]')"
+          registry="oci://ghcr.io/$owner/charts"
+          echo "$GH_TOKEN" | helm registry login ghcr.io -u "$ACTOR" --password-stdin
+          chart_field() {
+            sed -n "s/^$1:[[:space:]]*//p" "$2" | head -n 1 |
+              sed -e 's/[[:space:]]*#.*//' -e 's/[[:space:]]*$//' -e 's/^"\(.*\)"$/\1/' -e "s/^'\(.*\)'$/\1/"
+          }
+          mkdir -p dist
+          for chart in charts/*/; do
+            chart="${chart%/}"
+            name="$(chart_field name "$chart/Chart.yaml")"
+            version="$(chart_field version "$chart/Chart.yaml")"
+            tag="$name-$version"
+            helm package "$chart" --destination dist >/dev/null
+            package="dist/$name-$version.tgz"
+
+            # The registry: check through Helm using the GHCR login above. GHCR answers 404 when
+            # the tag is missing and 403 denied when the package does not exist yet; on a real
+            # permission error, helm push fails next.
+            if helm show chart "$registry/$name" --version "$version" >/dev/null 2>/tmp/show.err; then
+              echo "$registry/$name:$version is published"
+            elif grep -Eiq 'not found|manifest unknown|404|denied|403' /tmp/show.err; then
+              helm push "$package" "$registry"
+            else
+              echo "::error::checking $registry/$name:$version: $(cat /tmp/show.err)"
+              exit 1
+            fi
+
+            # The tag and the GitHub release, with the package attached and fully uploaded (an
+            # upload cut short leaves an empty asset in the "starter" state). The release starts
+            # as a draft and is published once its package is there, so it is never public, or
+            # immutable, without it.
+            if ! gh release view "$tag" >/dev/null 2>&1; then
+              gh release create "$tag" --draft --target "$GITHUB_SHA" --title "$name $version" \
+                --notes "helm install $name $registry/$name --version $version (see charts/$name/README.md)"
+            fi
+            asset="$(gh release view "$tag" --json assets \
+              --jq ".assets[] | select(.name == \"$name-$version.tgz\") | \"\(.state) \(.size)\"")"
+            case "$asset" in
+              "uploaded "[1-9]*) echo "$tag has its package" ;;
+              *)
+                [ -n "$asset" ] && gh release delete-asset "$tag" "$name-$version.tgz" --yes
+                gh release upload "$tag" "$package"
+                ;;
+            esac
+            draft="$(gh release view "$tag" --json isDraft --jq .isDraft)"
+            if [ "$draft" = true ]; then
+              gh release edit "$tag" --draft=false
+            fi
+
+            # A new GHCR package starts private, and GitHub's API cannot change that: an org
+            # admin makes it public once, in the package's settings.
+            if ! HELM_REGISTRY_CONFIG=/tmp/anonymous.json helm show chart "$registry/$name" --version "$version" >/dev/null 2>&1; then
+              echo "::warning::$registry/$name is not public yet. Make it public: https://github.com/orgs/$OWNER/packages/container/charts%2F$name/settings"
+            fi
+          done

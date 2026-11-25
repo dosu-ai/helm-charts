@@ -1,0 +1,22 @@
+# The install test on kind with STORE=gs: a fake-gcs-server bucket in the namespace. The Secret
+# seshi-store holds a stand-in service account key, which the chart mounts; seshi does not read
+# it while STORAGE_EMULATOR_HOST is set.
+store:
+  url: gs://seshi-e2e/sessions
+  credentials:
+    existingSecret: seshi-store
+extraEnv:
+  - name: STORAGE_EMULATOR_HOST
+    value: http://fake-gcs:4443
+config:
+  worker:
+    heartbeat_interval: 1s
+  search:
+    interval: 1s
+dropIns:
+  10-capture:
+    capture:
+      exclude: [acme/secret]
+persistence:
+  enabled: true
+  size: 1Gi

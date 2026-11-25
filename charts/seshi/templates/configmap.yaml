@@ -1,0 +1,18 @@
+{{- include "seshi.validate" . }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "seshi.suffixed" (dict "root" . "suffix" "config") | quote }}
+  labels:
+    {{- include "seshi.labels" . | nindent 4 }}
+data:
+  seshi.toml: |2
+    {{- include "seshi.toml" . | nindent 4 }}
+  {{- range $name, $dropIn := .Values.dropIns }}
+  dropin.{{ $name }}.toml: |2
+    {{- toToml $dropIn | nindent 4 }}
+  {{- end }}
+  {{- range $file, $content := .Values.redactionPacks }}
+  pack.{{ $file }}: |2
+    {{- $content | nindent 4 }}
+  {{- end }}

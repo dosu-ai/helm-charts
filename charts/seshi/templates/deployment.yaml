@@ -1,0 +1,10 @@
+{{- /* One pod with both roles, or (api.replicas above 1) that many API pods behind the Service
+and one worker pod beside them (README.md, "Several API pods"). The pod spec is
+seshi.deployment in _deployment.tpl. */}}
+{{- if gt (int .Values.api.replicas) 1 }}
+{{- include "seshi.deployment" (dict "root" . "component" "server" "roles" "api" "replicas" (int .Values.api.replicas)) }}
+---
+{{ include "seshi.deployment" (dict "root" . "component" "worker" "roles" "worker" "replicas" 1) }}
+{{- else }}
+{{- include "seshi.deployment" (dict "root" . "component" "server" "roles" "api,worker" "replicas" 1) }}
+{{- end }}
