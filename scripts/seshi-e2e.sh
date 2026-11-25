@@ -232,6 +232,19 @@ for object in role rolebinding; do
 done
 k -n "$NS" annotate secret "$secret" "seshi.dosu.ai/store=$store" --overwrite >/dev/null
 
+echo "--- reinstall: a Secret noted admin-token-lost stops the bootstrap until the printed repair"
+k -n "$NS" annotate secret "$secret" seshi.dosu.ai/bootstrap=admin-token-lost --overwrite >/dev/null
+reinstall 60s && fail "the bootstrap accepted a Secret that lost its admin token"
+job_log check | grep -q "lost the store's first admin token" ||
+  fail "the bootstrap did not say the admin token was lost"
+# The log's last command clears the note; run it as an operator would.
+repair="$(job_log check | grep -o "kubectl -n $NS annotate secret .*")" ||
+  fail "the bootstrap did not print how to clear the note"
+eval "k ${repair#kubectl }" >/dev/null || fail "the printed repair failed: $repair"
+reinstall 3m || fail "a reinstall after clearing the note failed"
+[ "$(k -n "$NS" get secret "$secret" -o jsonpath='{.metadata.creationTimestamp}')" = "$created" ] ||
+  fail "the reinstall replaced $secret"
+
 echo "--- reinstall: tokens an earlier run made but never saved are reported, not ignored"
 k -n "$NS" get secret "$secret" -o yaml >"$WORK/secret.yaml"
 k -n "$NS" delete secret "$secret" >/dev/null
@@ -239,8 +252,11 @@ k -n "$NS" patch configmap "$RELEASE-bootstrap" --type merge -p '{"data":{"statu
 reinstall 60s && fail "the bootstrap succeeded although its tokens were lost"
 job_log admin-init | grep -q "never saved them" || fail "the bootstrap did not explain the lost tokens"
 
-echo "--- reinstall: a store whose admin was made elsewhere is recorded, not an error"
-k -n "$NS" patch configmap "$RELEASE-bootstrap" --type merge -p '{"data":{"status":"initialized"}}' >/dev/null
+echo "--- reinstall: after the printed repair, a store whose admin was made elsewhere is recorded"
+# The log's last command records that the store has its admin; run it as an operator would.
+repair="$(job_log admin-init | grep -o "kubectl -n $NS patch configmap .*")" ||
+  fail "the bootstrap did not print how to record the store's admin"
+eval "k ${repair#kubectl }" >/dev/null || fail "the printed repair failed: $repair"
 reinstall 3m || fail "a reinstall over a store with an admin and no Secret failed"
 [ "$(k -n "$NS" get configmap "$RELEASE-bootstrap" -o jsonpath='{.data.status}')" = already-initialized ] ||
   fail "the bootstrap did not record already-initialized"

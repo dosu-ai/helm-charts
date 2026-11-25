@@ -16,7 +16,9 @@ Every change goes through a pull request, squash-merged into `main`, with a
 chart bumps its `version` in `Chart.yaml`, and CI checks that it did: a patch for a fix, a
 minor for a new value or behavior. Before 1.0, never a major.
 
-The seshi chart's checks run locally with `helm`, `docker` and `bun`:
+The seshi chart's checks run locally with `helm`, `docker` and `bun`, and `kubeconform` when it
+is on `PATH` (the check skips it otherwise). The kind tests also need `kind`, `kubectl`, `curl`,
+and for `STORE=s3` the AWS CLI:
 
 ```sh
 bun scripts/seshi-check.ts        # lint, render, seshi config check, refused values, kubeconform
